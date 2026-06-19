@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.local/
+.uwlearn-mcp/
+playwright-profile/
+storage-state.json
+*.trace.zip
+logs/
+.env
+.playwright-cli/
+output/
+*.log
+.DS_Store

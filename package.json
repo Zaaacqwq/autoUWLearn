@@ -1,0 +1,47 @@
+{
+  "name": "autouwlearn",
+  "version": "0.1.0",
+  "description": "Read-only MCP server for Waterloo LEARN content via an authenticated Playwright browser session.",
+  "type": "module",
+  "main": "dist/server.js",
+  "bin": {
+    "autouwlearn": "dist/server.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsx src/server.ts",
+    "dev:http": "tsx src/httpServer.ts",
+    "dev:login": "tsx src/loginProfile.ts",
+    "login:profile": "node dist/loginProfile.js",
+    "start": "node dist/server.js",
+    "start:http": "node dist/httpServer.js",
+    "start:http:mac": "bash scripts/start-http.sh",
+    "typecheck": "tsc --noEmit",
+    "test": "npm run typecheck"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Zaaacqwq/autoUWLearn.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/Zaaacqwq/autoUWLearn/issues"
+  },
+  "homepage": "https://github.com/Zaaacqwq/autoUWLearn#readme",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.29.0",
+    "cheerio": "^1.2.0",
+    "mime-types": "^3.0.2",
+    "playwright": "^1.61.0",
+    "zod": "^4.4.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/mime-types": "^3.0.1",
+    "@types/node": "^25.9.3",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3"
+  }
+}
