@@ -3,10 +3,21 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Request, Response } from "express";
 import { config } from "./config.js";
+import { createRateLimiter } from "./rateLimit.js";
+import { secretsMatch } from "./secrets.js";
 
 const scope = "learn.read";
-const tokenTtlSeconds = 60 * 60 * 24 * 30;
+const tokenTtlSeconds = 60 * 60 * 24 * 7;
 const codeTtlMs = 10 * 60 * 1000;
+
+// The OAuth password is the only credential guarding this resource, and every
+// other authorize parameter is public (the redirect allowlist is hard-coded and
+// the resource URL is published in the protected-resource metadata). Bound the
+// number of guesses per window.
+const authorizeLimiter = createRateLimiter({
+  capacity: Number(process.env.LEARN_MCP_AUTHORIZE_ATTEMPTS ?? 10),
+  windowMs: Number(process.env.LEARN_MCP_AUTHORIZE_WINDOW_MS ?? 15 * 60 * 1000)
+});
 
 interface AuthorizationCode {
   clientId: string;
@@ -63,6 +74,7 @@ export function authorizationServerMetadata() {
     authorization_endpoint: `${issuer}/oauth/authorize`,
     token_endpoint: `${issuer}/oauth/token`,
     registration_endpoint: `${issuer}/oauth/register`,
+    revocation_endpoint: `${issuer}/oauth/revoke`,
     scopes_supported: [scope],
     response_types_supported: ["code"],
     grant_types_supported: ["authorization_code"],
@@ -146,11 +158,24 @@ export function handleAuthorize(req: Request, res: Response) {
     return;
   }
 
-  const expectedPassword = process.env.LEARN_MCP_OAUTH_PASSWORD;
-  if (!expectedPassword || String(req.body?.password ?? "") !== expectedPassword) {
+  const decision = authorizeLimiter.consume();
+  if (!decision.allowed) {
+    const retryAfterSeconds = Math.ceil(decision.retryAfterMs / 1000);
+    res.setHeader("Retry-After", String(retryAfterSeconds));
+    res.status(429).type("html").send(`<!doctype html><html><body><h1>Too many attempts</h1><p>Try again in ${retryAfterSeconds} seconds.</p></body></html>`);
+    return;
+  }
+
+  const expectedPassword = process.env.LEARN_MCP_OAUTH_PASSWORD ?? "";
+  if (!secretsMatch(String(req.body?.password ?? ""), expectedPassword)) {
     res.status(401).type("html").send(`<!doctype html><html><body><h1>Unauthorized</h1><p>Invalid OAuth password.</p><p><a href="javascript:history.back()">Try again</a></p></body></html>`);
     return;
   }
+
+  // A correct password clears the budget so a legitimate login is never
+  // throttled by earlier failed guesses.
+  authorizeLimiter.reset();
+  sweepExpiredCodes();
 
   const code = randomToken();
   authorizationCodes.set(code, {
@@ -219,6 +244,18 @@ export function handleToken(req: Request, res: Response) {
   });
 }
 
+export function handleRevoke(req: Request, res: Response) {
+  const body = req.body && typeof req.body === "object" ? (req.body as Record<string, unknown>) : {};
+  const token = String(body.token ?? "");
+  if (token && accessTokens.delete(token)) {
+    saveTokenStore();
+  }
+
+  // RFC 7009: respond 200 whether or not the token existed, so this endpoint
+  // cannot be used to probe which tokens are valid.
+  res.status(200).json({});
+}
+
 export function verifyAccessToken(authHeader: string | undefined): boolean {
   if (!authHeader) return false;
   const match = authHeader.match(/^Bearer\s+(.+)$/i);
@@ -258,6 +295,18 @@ function saveTokenStore() {
     fs.chmodSync(config.oauthTokenStorePath, 0o600);
   } catch (error) {
     console.error("Failed to persist OAuth token store:", error);
+  }
+}
+
+/**
+ * Authorization codes are only removed when redeemed, so codes that are issued
+ * and never exchanged would accumulate for the process lifetime. Sweep them
+ * whenever a new one is minted.
+ */
+function sweepExpiredCodes(): void {
+  const now = Date.now();
+  for (const [code, record] of authorizationCodes) {
+    if (record.expiresAt < now) authorizationCodes.delete(code);
   }
 }
 

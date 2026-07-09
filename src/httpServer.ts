@@ -13,6 +13,7 @@ import { getToolDocs, openApiSpec } from "./toolRegistry.js";
 import {
   authorizationServerMetadata,
   handleAuthorize,
+  handleRevoke,
   handleToken,
   oauthChallenge,
   protectedResourceMetadata,
@@ -70,6 +71,7 @@ app.post("/oauth/register", registerOAuthClient);
 app.get("/oauth/authorize", renderAuthorize);
 app.post("/oauth/authorize", handleAuthorize);
 app.post("/oauth/token", handleToken);
+app.post("/oauth/revoke", handleRevoke);
 
 app.get("/health", (_req: Request, res: Response) => {
   res.json({
