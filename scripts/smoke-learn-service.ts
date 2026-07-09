@@ -34,7 +34,9 @@ for (const course of courses) {
 const upcoming = await service.upcoming({ daysAhead: 14 });
 console.log(`\n=== due in the next 14 days: ${upcoming.items.length} ===`);
 for (const item of upcoming.items) {
-  console.log(`   ${toronto(item.dueAt).padEnd(22)} ${item.courseLabel.padEnd(10)} ${item.type.padEnd(10)} ${item.title}`);
+  console.log(
+    `   ${item.dueAtLocal.padEnd(22)} ${item.courseLabel.padEnd(10)} ${item.type.padEnd(10)} ${item.submissionStatus.padEnd(15)} ${item.title}`
+  );
 }
 if (upcoming.errors.length) {
   console.log(`   errors: ${upcoming.errors.map((e) => `${e.courseLabel}/${e.source}: ${e.error}`).join("; ")}`);

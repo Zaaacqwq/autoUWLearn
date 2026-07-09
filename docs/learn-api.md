@@ -42,7 +42,7 @@ reads. Versions: `le` 1.95, `lp` 1.61.
 Not usable: `/quizzes/{id}/attempts/` (403), `/dropbox/folders/{id}/submissions/` (403),
 `/calendar/events/myEvents/` (400), `/d2l/api/le/unstable/*` (404).
 
-### Calendar events — the only complete deadline source
+### Calendar events
 
 Both date bounds are required; without them the endpoint returns `200 []`, which
 reads like "no events" rather than "you forgot the range". Scoped per org unit.
@@ -57,18 +57,36 @@ reads like "no events" rather than "you forgot the range". Scoped per org unit.
 | **6** | **Due** | **ModuleCO, Quiz, Dropbox** |
 | 8 | Discussion forum | DiscussionForum |
 
-`EventType === 6` is the deadline set. `AssociatedEntity.AssociatedEntityId`
-links back to the quiz or dropbox folder, which is how a deadline gets joined to
-its submission status.
+`AssociatedEntity.AssociatedEntityId` links back to the quiz or dropbox folder,
+which is how a deadline gets joined to its submission status.
 
-This is strictly larger than `dropbox/folders` ∪ `quizzes`. ECE 380's
-`Assignment 4` (due Jul 15) is `AssociatedEntityType:
-D2L.LE.Content.ContentObject.ModuleCO` — a **content module** with a due date. It
-lives in an org unit whose dropbox folder list is empty, so no amount of querying
-`dropbox/folders` or `quizzes` would ever surface it.
+An entity emits up to three events (2, 6, 3). **The effective deadline is the
+`due` event if there is one, otherwise the `availability ends` event.** Filtering
+to `EventType === 6` alone loses real deadlines: FR 151's tests carry no due
+date and close on availability.
 
 Note that a course's deadlines may live in a different org unit than its
 assignments: ECE 380's calendar events are split across both of its org units.
+
+### No single source is complete — take the union
+
+Checked every dated entity in every course against the calendar:
+
+| Course | Calendar events | Result |
+|---|---|---|
+| ECE 318, ECE 380 | 17, 31 | Calendar covers everything |
+| **ECE 327** | **0** | All three quizzes exist only in `quizzes` |
+| **FR 151** | 19 | `Test #3` missing; `Assignment 4`-style items missing elsewhere |
+
+- The calendar carries deadlines the others cannot express: a **content module**
+  with a due date (`ModuleCO`), living in an org unit whose dropbox folder list
+  is empty. `dropbox/folders` and `quizzes` can never surface it.
+- `dropbox/folders` and `quizzes` carry deadlines the calendar omits entirely:
+  ECE 327's calendar holds **zero** events while all its quizzes are dated.
+
+So `learn_due_dates` unions all three and collapses duplicates on
+`(course, title, instant)`. `EventType 8` (discussion) is not currently treated
+as a deadline.
 
 ## Server-rendered pages (status)
 
@@ -115,10 +133,11 @@ per-user filter state.
 
 ## Consequences for this repo
 
-1. `learn_due_dates` reads dropbox folders + quizzes, so it **silently misses
-   deadlines attached to anything else**. Verified: ECE 380 Assignment 4, due
-   Jul 15, is a content-module deadline and is absent from the tool's output.
-   Fix: source deadlines from `calendar/events/` with `EventType === 6`.
+1. `learn_due_dates` read dropbox folders + quizzes, so it **silently missed
+   deadlines attached to anything else**. ECE 380 Assignment 4, due Jul 15, is a
+   content-module deadline and was absent from the tool's output. Fixed by
+   unioning the calendar with the two API sources; sourcing from the calendar
+   alone would have lost ECE 327's quizzes instead.
 2. Nothing exposes submission status, so "did I submit this?" cannot be answered.
    A model asked it will try to infer from "no grade yet", which is wrong: a
    submitted, ungraded quiz has no grade. Fix: parse the two list pages and join

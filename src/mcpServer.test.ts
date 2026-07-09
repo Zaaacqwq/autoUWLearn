@@ -30,10 +30,37 @@ function fakeApi(overrides: { failAll?: Error } = {}) {
     warmUp: async () => ({ le: "1.95", lp: "1.61" }),
     getJson: async () => ({}),
     courses: async () => guard(coursesPayload),
-    assignments: async (ou: string | number) =>
-      guard(String(ou) === "2002" ? [{ Id: 4001, Name: "Lab1.Post-lab", DueDate: day(2) }] : []),
-    quizzes: async (ou: string | number) =>
-      guard({ Objects: String(ou) === "2002" ? [{ QuizId: 9, Name: "Prelab4", DueDate: day(4), IsActive: true }] : [] }),
+    calendarEvents: async (ou: string | number) =>
+      guard(
+        String(ou) === "2002"
+          ? [
+              {
+                CalendarEventId: 1,
+                Title: "Lab1.Post-lab",
+                EventType: 6,
+                StartDateTime: day(2),
+                EndDateTime: day(2),
+                AssociatedEntity: { AssociatedEntityType: "D2L.LE.Dropbox.Dropbox", AssociatedEntityId: 4001 }
+              },
+              {
+                CalendarEventId: 2,
+                Title: "Prelab4",
+                EventType: 6,
+                StartDateTime: day(4),
+                EndDateTime: day(4),
+                AssociatedEntity: { AssociatedEntityType: "D2L.LE.Quizzing.Quiz", AssociatedEntityId: 9 }
+              }
+            ]
+          : []
+      ),
+    fetchHtml: async (path: string) =>
+      guard(
+        /quizzing/.test(path)
+          ? '<table><tr><td><a href="javascript://">Prelab4</a></td><td></td><td>0 / 1</td></tr></table>'
+          : '<table><tr><th>Lab1.Post-lab</th><td><a href="/x?db=4001">1 Submission, 1 File</a></td><td>-</td><td></td></tr></table>'
+      ),
+    assignments: async () => guard([]),
+    quizzes: async () => guard({ Objects: [] }),
     grades: async (ou: string | number) =>
       guard(
         String(ou) === "2002"
@@ -139,6 +166,19 @@ test("learn_due_dates answers 'what is due this week' without disambiguation", a
     assert.deepEqual(content.items.map((i: any) => i.title), ["Lab1.Post-lab", "Prelab4"]);
     assert.deepEqual(content.items.map((i: any) => i.type), ["assignment", "quiz"]);
     assert.equal(content.items[0].courseLabel, "ECE 318");
+  });
+});
+
+test("learn_due_dates reports submission status, so a model need not infer it from grades", async () => {
+  await withClient(async (client) => {
+    const result = await client.callTool({ name: "learn_due_dates", arguments: { daysAhead: 7 } });
+    const content = result.structuredContent as any;
+
+    const assignment = content.items.find((i: any) => i.title === "Lab1.Post-lab");
+    const quiz = content.items.find((i: any) => i.title === "Prelab4");
+    assert.equal(assignment.submissionStatus, "submitted");
+    assert.equal(quiz.submissionStatus, "not_submitted");
+    assert.ok(assignment.dueAtLocal, "a local rendering is present alongside the UTC instant");
   });
 });
 

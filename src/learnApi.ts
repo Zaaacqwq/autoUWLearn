@@ -68,6 +68,30 @@ export interface WhoAmI {
   readonly UniqueName?: string;
 }
 
+/** `EventType` values seen on UW's instance. 6 is the deadline set. */
+export const CALENDAR_EVENT_TYPE = {
+  event: 1,
+  availabilityStarts: 2,
+  availabilityEnds: 3,
+  due: 6,
+  discussion: 8
+} as const;
+
+export interface CalendarEvent {
+  readonly CalendarEventId: number;
+  readonly Title: string;
+  readonly EventType: number;
+  readonly StartDateTime: string;
+  readonly EndDateTime: string;
+  readonly IsAllDayEvent?: boolean;
+  readonly OrgUnitId?: number;
+  readonly OrgUnitName?: string;
+  readonly AssociatedEntity?: {
+    readonly AssociatedEntityType?: string;
+    readonly AssociatedEntityId?: number;
+  } | null;
+}
+
 export interface LearnApi {
   warmUp(): Promise<ApiVersions>;
   versions(): Promise<ApiVersions>;
@@ -75,6 +99,13 @@ export interface LearnApi {
   fetchFile(path: string): Promise<FetchedFile>;
   /** Cheapest authenticated call; used to probe whether the session is alive. */
   whoami(): Promise<WhoAmI>;
+  /**
+   * Calendar events for one org unit. Both bounds are required: without them
+   * LEARN answers `200 []`, which reads like "no events" rather than an error.
+   */
+  calendarEvents(orgUnitId: number | string, startIso: string, endIso: string): Promise<CalendarEvent[]>;
+  /** For the two pages that state submission status; the API does not expose it. */
+  fetchHtml(path: string): Promise<string>;
   courses<T = unknown>(): Promise<T>;
   grades<T = unknown>(orgUnitId: number | string): Promise<T>;
   assignments<T = unknown>(orgUnitId: number | string): Promise<T>;
@@ -205,12 +236,33 @@ export function createLearnApi(options: LearnApiOptions): LearnApi {
     return getJson<WhoAmI>(`/d2l/api/lp/${(await versions()).lp}/users/whoami`);
   }
 
+  async function calendarEvents(
+    orgUnitId: number | string,
+    startIso: string,
+    endIso: string
+  ): Promise<CalendarEvent[]> {
+    const query = `startDateTime=${encodeURIComponent(startIso)}&endDateTime=${encodeURIComponent(endIso)}`;
+    return getJson<CalendarEvent[]>(await le(orgUnitId, `calendar/events/?${query}`));
+  }
+
+  async function fetchHtml(path: string): Promise<string> {
+    const url = new URL(path, baseUrl).toString();
+    const requestHeaders = { Cookie: await options.cookieHeader(), Accept: "text/html" };
+    const response = await limited(() => fetchImpl(url, { redirect: "follow", headers: requestHeaders }));
+
+    if (response.status === 403) throw await classifyForbidden(path);
+    if (!response.ok) throw new LearnHttpError(response.status, path);
+    return response.text();
+  }
+
   return {
     versions,
     warmUp: versions,
     getJson,
     fetchFile,
     whoami,
+    calendarEvents,
+    fetchHtml,
 
     courses: <T>() =>
       getJson<T>(

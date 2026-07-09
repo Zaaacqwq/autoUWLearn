@@ -215,10 +215,15 @@ export const MergedCoursesResultSchema = z.object({
 });
 
 export const UpcomingItemSchema = z.object({
-  type: z.enum(["assignment", "quiz"]),
+  type: z.enum(["assignment", "quiz", "module", "discussion", "other"]),
   id: z.string(),
   title: z.string(),
+  /** UTC instant. */
   dueAt: z.string(),
+  /** The same instant in the user's timezone; prefer this when speaking to them. */
+  dueAtLocal: z.string(),
+  /** not_applicable: nothing is handed in through LEARN for this item. */
+  submissionStatus: z.enum(["submitted", "not_submitted", "not_applicable", "unknown"]),
   courseKey: z.string(),
   courseLabel: z.string(),
   orgUnitId: z.string()

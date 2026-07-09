@@ -190,7 +190,7 @@ export function createLearnMcpServer(
 
   registerReadOnlyTool(
     "learn_due_dates",
-    "Every assignment and quiz due in the next N days, across all courses at once. Omit courseQuery to cover all courses. Read the items array; courses and errors are metadata. Use this to answer 'what is due this week'.",
+    "Everything due in the next N days, across all courses at once: assignments, quizzes, and content modules that carry a deadline. Each item reports submissionStatus, so answer 'did I submit this?' from that field and never infer it from whether a grade exists — a submitted but ungraded item has no grade. Prefer dueAtLocal when speaking to the user; dueAt is UTC. Omit courseQuery to cover all courses.",
     {
       courseQuery: z.string().min(1).optional(),
       daysAhead: z.number().int().min(1).max(180).default(14).optional()

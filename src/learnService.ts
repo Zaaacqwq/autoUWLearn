@@ -1,7 +1,8 @@
 import { flattenToc, type ContentTopic, type RawModule } from "./contentTree.js";
 import { findCourses, mergeOrgUnits, type Course, type OrgUnit } from "./courseIdentity.js";
 import { extractDocumentText } from "./extractText.js";
-import type { LearnApi } from "./learnApi.js";
+import { CALENDAR_EVENT_TYPE, type CalendarEvent, type LearnApi } from "./learnApi.js";
+import { parseDropboxList, parseQuizList, type SubmissionState } from "./submissionStatus.js";
 
 export type ResolutionStatus = "ok" | "not_found";
 
@@ -13,11 +14,24 @@ export interface OrgUnitError {
   readonly message: string;
 }
 
+export type DueItemKind = "assignment" | "quiz" | "module" | "discussion" | "other";
+
+/**
+ * `not_applicable` is a content module or similar: it carries a deadline but
+ * nothing is handed in through LEARN, so "did I submit it?" has no answer here.
+ * `unknown` means we could not read the status page.
+ */
+export type DueSubmissionStatus = "submitted" | "not_submitted" | "not_applicable" | "unknown";
+
 export interface DueItem {
-  readonly type: "assignment" | "quiz";
+  readonly type: DueItemKind;
   readonly id: string;
   readonly title: string;
+  /** UTC instant. */
   readonly dueAt: string;
+  /** The same instant rendered in the configured timezone, for the model. */
+  readonly dueAtLocal: string;
+  readonly submissionStatus: DueSubmissionStatus;
   readonly courseKey: string;
   readonly courseLabel: string;
   readonly orgUnitId: string;
@@ -54,6 +68,8 @@ export interface Result<T> {
 export interface LearnServiceOptions {
   readonly api: LearnApi;
   readonly now?: () => number;
+  /** IANA zone used to render dueAtLocal. */
+  readonly timeZone?: string;
 }
 
 export interface CourseTopic extends ContentTopic {
@@ -137,6 +153,32 @@ const pair = (
 export function createLearnService(options: LearnServiceOptions): LearnService {
   const { api } = options;
   const now = options.now ?? Date.now;
+  const timeZone = options.timeZone ?? "America/Toronto";
+
+  /** LEARN returns UTC. A model reading "03:59Z" should not have to guess. */
+  const renderLocal = (iso: string): string => {
+    const at = new Date(iso);
+    if (Number.isNaN(at.getTime())) return iso;
+    return at.toLocaleString("en-CA", { timeZone, dateStyle: "medium", timeStyle: "short" });
+  };
+
+  const submissionFor = (
+    kind: DueItemKind,
+    title: string,
+    entityId: number | undefined,
+    status: Awaited<ReturnType<typeof statusFor>> | null
+  ): DueSubmissionStatus => {
+    // Nothing is handed in through LEARN for these, so there is no status to read.
+    if (kind === "module" || kind === "discussion" || kind === "other") return "not_applicable";
+    if (!status) return "unknown";
+
+    if (kind === "quiz") return status.quizzesByName.get(title) ?? "unknown";
+
+    // An assignment's folder id is the calendar event's associated entity, but a
+    // row that links to no history page carries none, so fall back to the name.
+    const byId = entityId === undefined ? undefined : status.foldersById.get(String(entityId));
+    return byId ?? status.foldersByName.get(title) ?? "unknown";
+  };
 
   async function courses(): Promise<Course[]> {
     const payload = await api.courses<{ Courses?: RawCourse[] }>();
@@ -189,6 +231,78 @@ export function createLearnService(options: LearnServiceOptions): LearnService {
     return { items, errors };
   }
 
+  const kindOf = (associatedType: string | undefined): DueItemKind => {
+    if (!associatedType) return "other";
+    if (associatedType.endsWith("Dropbox")) return "assignment";
+    if (associatedType.endsWith("Quiz")) return "quiz";
+    if (associatedType.endsWith("ModuleCO")) return "module";
+    if (associatedType.endsWith("DiscussionForum")) return "discussion";
+    return "other";
+  };
+
+  /**
+   * Reads the two pages that state submission status. The Valence API has no
+   * student-visible equivalent, so this is the only source.
+   */
+  async function statusFor(orgUnitId: string): Promise<{
+    quizzesByName: Map<string, SubmissionState>;
+    foldersById: Map<string, SubmissionState>;
+    foldersByName: Map<string, SubmissionState>;
+  }> {
+    const [quizHtml, dropboxHtml] = await Promise.all([
+      api.fetchHtml(`/d2l/lms/quizzing/user/quizzes_list.d2l?ou=${orgUnitId}`),
+      api.fetchHtml(`/d2l/lms/dropbox/user/folders_list.d2l?ou=${orgUnitId}`)
+    ]);
+
+    const quizzesByName = new Map(parseQuizList(quizHtml).map((q) => [q.name, q.state]));
+    const folders = parseDropboxList(dropboxHtml);
+    return {
+      quizzesByName,
+      foldersById: new Map(folders.flatMap((f) => (f.folderId ? [[f.folderId, f.state] as const] : []))),
+      foldersByName: new Map(folders.map((f) => [f.shortName, f.state]))
+    };
+  }
+
+  /**
+   * A calendar entity's effective deadline.
+   *
+   * An entity emits up to three events: availability starts, due, availability
+   * ends. Prefer the due date. Some items have no due date at all and close on
+   * availability instead — FR 151's tests are like that — and for them the
+   * availability end *is* the deadline. Ignoring that loses real deadlines.
+   */
+  const effectiveDeadlines = (events: readonly CalendarEvent[]): CalendarEvent[] => {
+    const byEntity = new Map<string, CalendarEvent[]>();
+    for (const event of events) {
+      if (event.EventType !== CALENDAR_EVENT_TYPE.due && event.EventType !== CALENDAR_EVENT_TYPE.availabilityEnds) {
+        continue;
+      }
+      const key = `${event.AssociatedEntity?.AssociatedEntityId ?? "none"}|${event.Title}`;
+      const group = byEntity.get(key) ?? [];
+      group.push(event);
+      byEntity.set(key, group);
+    }
+
+    return [...byEntity.values()].flatMap((group) => {
+      const chosen =
+        group.find((event) => event.EventType === CALENDAR_EVENT_TYPE.due) ??
+        group.find((event) => event.EventType === CALENDAR_EVENT_TYPE.availabilityEnds);
+      return chosen ? [chosen] : [];
+    });
+  };
+
+  /**
+   * Deadlines are the union of three sources, because none of them is complete.
+   *
+   * - The calendar carries deadlines the others cannot express: ECE 380's
+   *   Assignment 4 is a content module with a due date, in an org unit whose
+   *   dropbox folder list is empty.
+   * - dropbox/folders and quizzes carry deadlines the calendar omits: ECE 327's
+   *   quizzes are all dated, and its calendar holds zero events.
+   *
+   * Verified against the live account; neither source alone answers "what is
+   * due". Duplicates across sources collapse on (course, title, instant).
+   */
   async function upcoming(input: { daysAhead?: number; courseQuery?: string } = {}): Promise<Result<DueItem>> {
     const daysAhead = input.daysAhead ?? 14;
     const { status, matched } = await resolve(input.courseQuery);
@@ -196,7 +310,28 @@ export function createLearnService(options: LearnServiceOptions): LearnService {
       return { status, query: input.courseQuery, courses: [], items: [], errors: [] };
     }
 
-    const assignments = await fanOut(matched, "assignments", async (orgUnitId, course) => {
+    const from = now();
+    const until = from + daysAhead * 86_400_000;
+    // Ask wide, then filter: the window is ours, not LEARN's.
+    const startIso = new Date(from - 86_400_000).toISOString();
+    const endIso = new Date(until + 86_400_000).toISOString();
+
+    type Candidate = Omit<DueItem, "dueAtLocal" | "submissionStatus">;
+
+    const fromCalendar = await fanOut(matched, "calendar", async (orgUnitId, course): Promise<Candidate[]> => {
+      const events = await api.calendarEvents(orgUnitId, startIso, endIso);
+      return effectiveDeadlines(events).map((event) => ({
+        type: kindOf(event.AssociatedEntity?.AssociatedEntityType),
+        id: String(event.AssociatedEntity?.AssociatedEntityId ?? event.CalendarEventId),
+        title: event.Title,
+        dueAt: event.StartDateTime,
+        courseKey: course.key,
+        courseLabel: course.label,
+        orgUnitId
+      }));
+    });
+
+    const fromAssignments = await fanOut(matched, "assignments", async (orgUnitId, course): Promise<Candidate[]> => {
       const folders = await api.assignments<RawAssignment[]>(orgUnitId);
       return folders
         .filter((folder) => folder.IsHidden !== true)
@@ -217,7 +352,7 @@ export function createLearnService(options: LearnServiceOptions): LearnService {
         });
     });
 
-    const quizzes = await fanOut(matched, "quizzes", async (orgUnitId, course) => {
+    const fromQuizzes = await fanOut(matched, "quizzes", async (orgUnitId, course): Promise<Candidate[]> => {
       const payload = await api.quizzes<{ Objects?: RawQuiz[] }>(orgUnitId);
       return (payload.Objects ?? [])
         .filter((quiz) => quiz.IsActive !== false)
@@ -238,30 +373,47 @@ export function createLearnService(options: LearnServiceOptions): LearnService {
         });
     });
 
-    const from = now();
-    const until = from + daysAhead * 86_400_000;
-
-    // Two sections of one course surface the same deadline twice.
+    // One deadline can arrive from several sources, and from several org units
+    // of one course.
     const seen = new Set<string>();
-    const items = [...assignments.items, ...quizzes.items]
+    const merged = [...fromCalendar.items, ...fromAssignments.items, ...fromQuizzes.items]
       .filter((item) => {
         const at = Date.parse(item.dueAt);
         return Number.isFinite(at) && at >= from && at <= until;
       })
       .sort((a, b) => Date.parse(a.dueAt) - Date.parse(b.dueAt))
       .filter((item) => {
-        const identity = `${item.courseKey}|${item.type}|${item.title}|${item.dueAt}`;
+        const identity = `${item.courseKey}|${item.title}|${new Date(item.dueAt).getTime()}`;
         if (seen.has(identity)) return false;
         seen.add(identity);
         return true;
       });
+
+    // Only read the status pages of org units that actually produced a deadline.
+    const statuses = new Map<string, Awaited<ReturnType<typeof statusFor>> | null>();
+    await Promise.all(
+      [...new Set(merged.map((item) => item.orgUnitId))].map(async (orgUnitId) => {
+        statuses.set(orgUnitId, await statusFor(orgUnitId).catch(() => null));
+      })
+    );
+
+    const items: DueItem[] = merged.map((item) => ({
+      ...item,
+      dueAtLocal: renderLocal(item.dueAt),
+      submissionStatus: submissionFor(
+        item.type,
+        item.title,
+        item.id === "" ? undefined : Number(item.id),
+        statuses.get(item.orgUnitId) ?? null
+      )
+    }));
 
     return {
       status: "ok",
       query: input.courseQuery,
       courses: matched,
       items,
-      errors: [...assignments.errors, ...quizzes.errors]
+      errors: [...fromCalendar.errors, ...fromAssignments.errors, ...fromQuizzes.errors]
     };
   }
 
