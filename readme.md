@@ -70,6 +70,15 @@ scripts/install-launchd.sh
 scripts/install-launchd.sh --tunnel <tunnel-name>
 ```
 
+Deploy a new revision to the machine running the service:
+
+```bash
+scripts/deploy.sh        # pull, clean build, test, restart, health check
+```
+
+Deploy from git, never by copying files in: a diverged working tree on the
+server is how uncommitted production code gets lost.
+
 Local MCP client configuration:
 
 ```json
