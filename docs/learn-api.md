@@ -37,7 +37,7 @@ reads. Versions: `le` 1.95, `lp` 1.61.
 | `/d2l/api/le/{le}/{ou}/news/` | Announcements incl. body |
 | `/d2l/api/le/{le}/{ou}/content/toc` | Content tree |
 | `/content/enforced/...` | Course files (PDF etc.) |
-| `/d2l/api/le/{le}/{ou}/calendar/events/?startDateTime=&endDateTime=` | **Every deadline.** See below |
+| `/d2l/api/le/{le}/{ou}/calendar/events/?startDateTime=&endDateTime=` | Deadlines, incl. ones the two rows above cannot express. See below |
 
 Not usable: `/quizzes/{id}/attempts/` (403), `/dropbox/folders/{id}/submissions/` (403),
 `/calendar/events/myEvents/` (400), `/d2l/api/le/unstable/*` (404).
