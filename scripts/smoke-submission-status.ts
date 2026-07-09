@@ -20,12 +20,16 @@ const html = async (p: string): Promise<string> => {
   return response.ok ? response.text() : "";
 };
 
-const courses: Array<[string, number]> = [
-  ["ECE 327", 900002],
-  ["ECE 318 Lab", 900001],
-  ["ECE 380 (b)", 900003],
-  ["FR 151", 900004]
-];
+// Discover the caller's own courses rather than hard-coding an enrolment.
+const payload = (await (
+  await fetch(`${BASE}/d2l/le/manageCourses/api/mycourses?pageSize=100&sort=current&orgUnitTypeId=3&embedDepth=0`, {
+    headers: { Cookie: cookie, Accept: "application/json" }
+  })
+).json()) as { Courses?: Array<{ OrgUnitId: string | number; Name?: string; IsActive?: boolean }> };
+
+const courses: Array<[string, string]> = (payload.Courses ?? [])
+  .filter((c) => c.IsActive !== false)
+  .map((c) => [c.Name ?? String(c.OrgUnitId), String(c.OrgUnitId)]);
 
 for (const [label, ou] of courses) {
   const quizzes = parseQuizList(await html(`/d2l/lms/quizzing/user/quizzes_list.d2l?ou=${ou}`));

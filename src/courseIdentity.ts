@@ -16,7 +16,7 @@ export interface CourseComponent {
 }
 
 export interface Course {
-  /** Stable identity, e.g. "ECE318", or "ou:930839" when there is no course code. */
+  /** Stable identity, e.g. "ECE318", or "ou:123456" when there is no course code. */
   readonly key: string;
   /** Human label, e.g. "ECE 318". */
   readonly label: string;

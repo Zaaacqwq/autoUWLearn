@@ -46,8 +46,8 @@ const dropboxHtml = `
     <td></td>
   </tr>
   <tr>
-    <th><a href="/d2l/lms/dropbox/user/folder_submit_files.d2l?db=406030">Lab1.Post-lab.205</a></th>
-    <td><a href="/d2l/lms/dropbox/user/folders_history.d2l?db=406030">2 Submissions, 2 Files</a></td>
+    <th><a href="/d2l/lms/dropbox/user/folder_submit_files.d2l?db=800003">Lab1.Post-lab.205</a></th>
+    <td><a href="/d2l/lms/dropbox/user/folders_history.d2l?db=800003">2 Submissions, 2 Files</a></td>
     <td>- / 100</td>
     <td>Feedback: Unread</td>
   </tr>
@@ -99,7 +99,7 @@ test("strips the category or lab-group prefix LEARN prepends to folder names", (
 test("folders expose the bare name for joining against the Valence API", () => {
   const folders = parseDropboxList(dropboxHtml);
   assert.equal(folders.find((f) => f.folderId === "800001")?.shortName, "Lab 1 - 205");
-  assert.equal(folders.find((f) => f.folderId === "406030")?.shortName, "Lab1.Post-lab.205");
+  assert.equal(folders.find((f) => f.folderId === "800003")?.shortName, "Lab1.Post-lab.205");
 });
 
 test("section header rows are not mistaken for quizzes", () => {
