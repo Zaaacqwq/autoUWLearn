@@ -61,11 +61,20 @@ export interface FetchedFile {
   readonly url: string;
 }
 
+export interface WhoAmI {
+  readonly Identifier: string;
+  readonly FirstName?: string;
+  readonly LastName?: string;
+  readonly UniqueName?: string;
+}
+
 export interface LearnApi {
   warmUp(): Promise<ApiVersions>;
   versions(): Promise<ApiVersions>;
   getJson<T = unknown>(path: string): Promise<T>;
   fetchFile(path: string): Promise<FetchedFile>;
+  /** Cheapest authenticated call; used to probe whether the session is alive. */
+  whoami(): Promise<WhoAmI>;
   courses<T = unknown>(): Promise<T>;
   grades<T = unknown>(orgUnitId: number | string): Promise<T>;
   assignments<T = unknown>(orgUnitId: number | string): Promise<T>;
@@ -192,11 +201,16 @@ export function createLearnApi(options: LearnApiOptions): LearnApi {
   const le = async (orgUnitId: number | string, suffix: string): Promise<string> =>
     `/d2l/api/le/${(await versions()).le}/${orgUnitId}/${suffix}`;
 
+  async function whoami(): Promise<WhoAmI> {
+    return getJson<WhoAmI>(`/d2l/api/lp/${(await versions()).lp}/users/whoami`);
+  }
+
   return {
     versions,
     warmUp: versions,
     getJson,
     fetchFile,
+    whoami,
 
     courses: <T>() =>
       getJson<T>(

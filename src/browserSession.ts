@@ -228,6 +228,23 @@ export class BrowserSession {
     return this.context.cookies().catch(() => null);
   }
 
+  /**
+   * Re-establishes a lapsed LEARN session without a human.
+   *
+   * Navigating to /d2l/home replays the SSO handshake. Waterloo's upstream
+   * identity provider outlives the Brightspace session, and Duo remembers this
+   * device for weeks, so the redirect usually lands back on the homepage already
+   * authenticated. Runs headless: nothing appears on the server's display.
+   *
+   * Returns false when SSO wants a password, which only a human can supply.
+   */
+  async refreshSession(): Promise<boolean> {
+    const status = await this.authStatus({ navigate: true, force: true });
+    if (!status.authenticated) return false;
+    await this.saveSessionState().catch(() => undefined);
+    return true;
+  }
+
   async close(): Promise<void> {
     await this.context?.close();
     this.context = undefined;

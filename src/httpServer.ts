@@ -8,7 +8,10 @@ import { isInitializeRequest } from "@modelcontextprotocol/sdk/types.js";
 import type { Request, Response } from "express";
 import { BrowserSession } from "./browserSession.js";
 import { config } from "./config.js";
+import { createLearnApi } from "./learnApi.js";
 import { createLearnMcpServer } from "./mcpServer.js";
+import { createSessionKeeper } from "./sessionKeeper.js";
+import { createCookieHeaderProvider } from "./sessionCookies.js";
 import { getToolDocs, openApiSpec } from "./toolRegistry.js";
 import {
   authorizationServerMetadata,
@@ -36,7 +39,33 @@ const app = createMcpExpressApp({
   allowedHosts: allowedHosts.length > 0 ? allowedHosts : undefined
 });
 const sharedBrowser = new BrowserSession();
-createLearnMcpServer(sharedBrowser);
+
+/**
+ * Brightspace signs a session out once it goes quiet, and offers no dedicated
+ * keep-alive endpoint — any authenticated request counts as activity. Make one
+ * on a timer, and try a silent re-login if the session lapses anyway.
+ */
+const sessionKeeper = createSessionKeeper({
+  intervalMs: Number(process.env.LEARN_HEARTBEAT_MS ?? 5 * 60 * 1000),
+  probe: async () => {
+    await createLearnApi({
+      baseUrl: config.learnBaseUrl,
+      cookieHeader: createCookieHeaderProvider({
+        liveCookies: () => sharedBrowser.liveCookies(),
+        storageStatePath: config.storageStatePath,
+        host: new URL(config.learnBaseUrl).hostname
+      })
+    }).whoami();
+  },
+  recover: () => sharedBrowser.refreshSession(),
+  onExpired: (error) => {
+    console.error(
+      `[session] LEARN session expired and silent re-login failed: ${error.message}\n` +
+        `[session] A human must complete Waterloo SSO at ${config.authUrl}`
+    );
+  }
+});
+
 const transports: Record<string, AnyTransport> = {};
 const browsers = new Set<{ close(): Promise<void> }>();
 
@@ -74,10 +103,18 @@ app.post("/oauth/token", handleToken);
 app.post("/oauth/revoke", handleRevoke);
 
 app.get("/health", (_req: Request, res: Response) => {
+  const session = sessionKeeper.status();
   res.json({
     ok: true,
     name: "autouwlearn",
-    transports: ["/mcp", "/sse"]
+    transports: ["/mcp", "/sse"],
+    // Exposed so a lapsed LEARN session is visible without asking a tool.
+    session: {
+      state: session.state,
+      lastOkAt: session.lastOkAt ? new Date(session.lastOkAt).toISOString() : null,
+      secondsSinceLastOk: session.lastOkAt ? Math.round((Date.now() - session.lastOkAt) / 1000) : null,
+      consecutiveFailures: session.consecutiveFailures
+    }
   });
 });
 
@@ -308,9 +345,15 @@ const httpServer = app.listen(port, host, (error?: Error) => {
   console.error(`autoUWLearn HTTP MCP server listening on http://${host}:${port}`);
   console.error(`Streamable HTTP endpoint: http://${host}:${port}/mcp`);
   console.error(`Legacy SSE endpoint:      http://${host}:${port}/sse`);
+
+  sessionKeeper.start();
+  void sessionKeeper.ping().then(() => {
+    console.error(`[session] initial probe: ${sessionKeeper.status().state}`);
+  });
 });
 
 async function shutdown() {
+  sessionKeeper.stop();
   for (const sessionId of Object.keys(transports)) {
     await transports[sessionId].close().catch(() => undefined);
     delete transports[sessionId];
