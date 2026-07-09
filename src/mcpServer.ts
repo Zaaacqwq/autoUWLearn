@@ -41,7 +41,9 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
       content: [
         {
           type: "text" as const,
-          text: JSON.stringify(value, null, 2)
+          text: options.structured && !options.isError
+            ? "Structured tool result is available in structuredContent."
+            : JSON.stringify(value, null, 2)
         }
       ],
       ...(structuredContent ? { structuredContent } : {}),
@@ -79,10 +81,10 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
       async (input: Record<string, unknown>) => {
         try {
           if (options.requiresAuth) {
-            const status = await learn.authStatus();
+            const status = await learn.authStatus(false);
             if (!status.authenticated) return jsonResult(authRequired(status), { isError: true });
           }
-          return jsonResult(await handler(input), { structured: Boolean(options.outputSchema) });
+          return jsonResult(await withToolTimeout(handler(input), name), { structured: Boolean(options.outputSchema) });
         } catch (error) {
           const message = error instanceof Error ? error.message : String(error);
           if (message.startsWith("{")) {
@@ -92,7 +94,7 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
               return jsonResult({ ok: false, error: "UNKNOWN_ERROR", message }, { isError: true });
             }
           }
-          return jsonResult({ ok: false, error: "UNKNOWN_ERROR", message }, { isError: true });
+          return jsonResult(classifyToolError(message), { isError: true });
         }
       }
     );
@@ -102,7 +104,7 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
     "learn_auth_status",
     "Check whether the Playwright browser profile is currently authenticated to Waterloo LEARN.",
     {},
-    async () => learn.authStatus(),
+    async () => learn.authStatus(true),
     { requiresAuth: false, outputSchema: AuthStatusSchema }
   );
 
@@ -150,9 +152,11 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
     "learn_list_courses",
     "List courses visible on the LEARN homepage using the Brightspace mycourses endpoint.",
     {
-      pageSize: z.number().int().min(1).max(500).default(100).optional()
+      pageSize: z.number().int().min(1).max(500).default(100).optional(),
+      includeRaw: z.boolean().default(false).optional(),
+      refresh: z.boolean().default(false).optional()
     },
-    async ({ pageSize }) => learn.listCourses((pageSize as number | undefined) ?? 100),
+    async ({ pageSize, includeRaw, refresh }) => learn.listCourses((pageSize as number | undefined) ?? 100, Boolean(refresh), Boolean(includeRaw)),
     { outputSchema: CoursesResultSchema }
   );
 
@@ -160,9 +164,11 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
     "learn_courses",
     "List current visible UW LEARN courses with id, name, code, and URL.",
     {
-      pageSize: z.number().int().min(1).max(500).default(100).optional()
+      pageSize: z.number().int().min(1).max(500).default(100).optional(),
+      includeRaw: z.boolean().default(false).optional(),
+      refresh: z.boolean().default(false).optional()
     },
-    async ({ pageSize }) => learn.listCourses((pageSize as number | undefined) ?? 100),
+    async ({ pageSize, includeRaw, refresh }) => learn.listCourses((pageSize as number | undefined) ?? 100, Boolean(refresh), Boolean(includeRaw)),
     { outputSchema: CoursesResultSchema }
   );
 
@@ -171,9 +177,10 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
     "Find visible LEARN courses by course id, course code, or natural query such as ECE 350. Returns all matches instead of guessing when ambiguous.",
     {
       query: z.string().min(1),
-      includeRaw: z.boolean().default(false).optional()
+      includeRaw: z.boolean().default(false).optional(),
+      refresh: z.boolean().default(false).optional()
     },
-    async ({ query, includeRaw }) => learn.findCourse(query as string, (includeRaw as boolean | undefined) ?? false),
+    async ({ query, includeRaw, refresh }) => learn.findCourse(query as string, Boolean(includeRaw), Boolean(refresh)),
     { outputSchema: CourseResolutionSchema }
   );
 
@@ -183,13 +190,15 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
     {
       courseQuery: z.string().min(1).optional(),
       daysAhead: z.number().int().min(1).max(180).default(14).optional(),
-      includeRaw: z.boolean().default(false).optional()
+      includeRaw: z.boolean().default(false).optional(),
+      refresh: z.boolean().default(false).optional()
     },
-    async ({ courseQuery, daysAhead, includeRaw }) =>
+    async ({ courseQuery, daysAhead, includeRaw, refresh }) =>
       learn.dueDatesSummary({
         courseQuery: courseQuery as string | undefined,
         daysAhead: (daysAhead as number | undefined) ?? 14,
-        includeRaw: (includeRaw as boolean | undefined) ?? false
+        includeRaw: Boolean(includeRaw),
+        refresh: Boolean(refresh)
       }),
     { outputSchema: DueDatesSchema }
   );
@@ -200,13 +209,15 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
     {
       courseQuery: z.string().min(1).optional(),
       daysAhead: z.number().int().min(1).max(180).default(14).optional(),
-      includeRaw: z.boolean().default(false).optional()
+      includeRaw: z.boolean().default(false).optional(),
+      refresh: z.boolean().default(false).optional()
     },
-    async ({ courseQuery, daysAhead, includeRaw }) =>
+    async ({ courseQuery, daysAhead, includeRaw, refresh }) =>
       learn.dueDatesSummary({
         courseQuery: courseQuery as string | undefined,
         daysAhead: (daysAhead as number | undefined) ?? 14,
-        includeRaw: (includeRaw as boolean | undefined) ?? false
+        includeRaw: Boolean(includeRaw),
+        refresh: Boolean(refresh)
       }),
     { outputSchema: DueDatesSchema }
   );
@@ -217,13 +228,15 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
     {
       courseQuery: z.string().min(1),
       limit: z.number().int().min(1).max(20).default(5).optional(),
-      includeRaw: z.boolean().default(false).optional()
+      includeRaw: z.boolean().default(false).optional(),
+      refresh: z.boolean().default(false).optional()
     },
-    async ({ courseQuery, limit, includeRaw }) =>
+    async ({ courseQuery, limit, includeRaw, refresh }) =>
       learn.latestAnnouncements({
         courseQuery: courseQuery as string,
         limit: (limit as number | undefined) ?? 5,
-        includeRaw: (includeRaw as boolean | undefined) ?? false
+        includeRaw: Boolean(includeRaw),
+        refresh: Boolean(refresh)
       }),
     { outputSchema: AnnouncementsResultSchema }
   );
@@ -234,13 +247,15 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
     {
       courseQuery: z.string().min(1),
       limit: z.number().int().min(1).max(20).default(5).optional(),
-      includeRaw: z.boolean().default(false).optional()
+      includeRaw: z.boolean().default(false).optional(),
+      refresh: z.boolean().default(false).optional()
     },
-    async ({ courseQuery, limit, includeRaw }) =>
+    async ({ courseQuery, limit, includeRaw, refresh }) =>
       learn.latestAnnouncements({
         courseQuery: courseQuery as string,
         limit: (limit as number | undefined) ?? 5,
-        includeRaw: (includeRaw as boolean | undefined) ?? false
+        includeRaw: Boolean(includeRaw),
+        refresh: Boolean(refresh)
       }),
     { outputSchema: AnnouncementsResultSchema }
   );
@@ -251,13 +266,15 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
     {
       courseQuery: z.string().min(1),
       daysAhead: z.number().int().min(1).max(180).default(14).optional(),
-      announcementLimit: z.number().int().min(1).max(20).default(3).optional()
+      announcementLimit: z.number().int().min(1).max(20).default(3).optional(),
+      refresh: z.boolean().default(false).optional()
     },
-    async ({ courseQuery, daysAhead, announcementLimit }) =>
+    async ({ courseQuery, daysAhead, announcementLimit, refresh }) =>
       learn.courseDashboard({
         courseQuery: courseQuery as string,
         daysAhead: (daysAhead as number | undefined) ?? 14,
-        announcementLimit: (announcementLimit as number | undefined) ?? 3
+        announcementLimit: (announcementLimit as number | undefined) ?? 3,
+        refresh: Boolean(refresh)
       }),
     { outputSchema: DashboardSchema }
   );
@@ -267,12 +284,14 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
     "Return a concise dashboard across all active visible courses.",
     {
       daysAhead: z.number().int().min(1).max(180).default(14).optional(),
-      announcementLimit: z.number().int().min(1).max(20).default(1).optional()
+      announcementLimit: z.number().int().min(1).max(20).default(1).optional(),
+      refresh: z.boolean().default(false).optional()
     },
-    async ({ daysAhead, announcementLimit }) =>
+    async ({ daysAhead, announcementLimit, refresh }) =>
       learn.allCoursesDashboard({
         daysAhead: (daysAhead as number | undefined) ?? 14,
-        announcementLimit: (announcementLimit as number | undefined) ?? 1
+        announcementLimit: (announcementLimit as number | undefined) ?? 1,
+        refresh: Boolean(refresh)
       }),
     { outputSchema: DashboardSchema }
   );
@@ -291,9 +310,10 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
     "learn_list_content",
     "Fetch and parse the D2L Content page for a course.",
     {
-      courseId: z.string().regex(/^\d+$/)
+      courseId: z.string().regex(/^\d+$/),
+      refresh: z.boolean().default(false).optional()
     },
-    async ({ courseId }) => learn.listContent(courseId as string),
+    async ({ courseId, refresh }) => learn.listContent(courseId as string, Boolean(refresh)),
     { outputSchema: ContentResultSchema }
   );
 
@@ -301,9 +321,10 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
     "learn_content",
     "Fetch and parse course content modules/topics for a course id.",
     {
-      courseId: z.string().regex(/^\d+$/)
+      courseId: z.string().regex(/^\d+$/),
+      refresh: z.boolean().default(false).optional()
     },
-    async ({ courseId }) => learn.listContent(courseId as string),
+    async ({ courseId, refresh }) => learn.listContent(courseId as string, Boolean(refresh)),
     { outputSchema: ContentResultSchema }
   );
 
@@ -343,9 +364,10 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
     "learn_list_grades",
     "Fetch and parse the read-only student grades page for a course.",
     {
-      courseId: z.string().regex(/^\d+$/)
+      courseId: z.string().regex(/^\d+$/),
+      refresh: z.boolean().default(false).optional()
     },
-    async ({ courseId }) => learn.listGrades(courseId as string),
+    async ({ courseId, refresh }) => learn.listGrades(courseId as string, Boolean(refresh)),
     { outputSchema: ParsedPageSchema }
   );
 
@@ -353,9 +375,10 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
     "learn_grades",
     "Fetch and parse the visible student grades page for a course id.",
     {
-      courseId: z.string().regex(/^\d+$/)
+      courseId: z.string().regex(/^\d+$/),
+      refresh: z.boolean().default(false).optional()
     },
-    async ({ courseId }) => learn.listGrades(courseId as string),
+    async ({ courseId, refresh }) => learn.listGrades(courseId as string, Boolean(refresh)),
     { outputSchema: ParsedPageSchema }
   );
 
@@ -410,4 +433,42 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
   );
 
   return { server, browser };
+}
+
+async function withToolTimeout<T>(operation: Promise<T> | T, toolName: string): Promise<T> {
+  let timeout: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      Promise.resolve(operation),
+      new Promise<never>((_resolve, reject) => {
+        timeout = setTimeout(
+          () => reject(new Error(`LEARN_TIMEOUT: ${toolName} exceeded the 20 second tool deadline.`)),
+          20_000
+        );
+      })
+    ]);
+  } finally {
+    if (timeout) clearTimeout(timeout);
+  }
+}
+
+function classifyToolError(message: string) {
+  if (/LEARN_TIMEOUT|timeout|timed out/i.test(message)) {
+    return {
+      ok: false,
+      error: "LEARN_TIMEOUT",
+      message,
+      action: "Retry once. If the session expired, open the local auth page."
+    };
+  }
+  if (/net::ERR_|connection reset|socket hang up|network/i.test(message)) {
+    return { ok: false, error: "NETWORK_ERROR", message, action: "Retry the request." };
+  }
+  if (/\b(403|429)\b|rate limit|blocked/i.test(message)) {
+    return { ok: false, error: "RATE_LIMIT_OR_BLOCKED", message, action: "Wait before retrying." };
+  }
+  if (/selector|layout|shadow root/i.test(message)) {
+    return { ok: false, error: "UNKNOWN_LEARN_LAYOUT", message };
+  }
+  return { ok: false, error: "UNKNOWN_ERROR", message };
 }

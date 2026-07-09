@@ -46,24 +46,25 @@ export const DueItemSchema = z.object({
 }).passthrough();
 
 export const DueDatesSchema = z.object({
-  dueDateLines: z.array(z.string()),
+  dueDateLines: z.array(z.string()).optional(),
   items: z.array(DueItemSchema),
-  itemCount: z.number(),
+  itemCount: z.number().optional(),
   status: z.string(),
   query: z.string().optional(),
-  daysAhead: z.number(),
-  errorCount: z.number(),
+  matches: z.array(NormalizedCourseSchema).optional(),
+  daysAhead: z.number().optional(),
+  errorCount: z.number().optional(),
   errors: z.array(z.object({
     courseId: z.string(),
     source: z.string(),
     message: z.string()
-  }).passthrough()),
-  checkedCourseCount: z.number(),
+  }).passthrough()).optional(),
+  checkedCourseCount: z.number().optional(),
   checkedCourses: z.array(z.object({
     courseId: z.string(),
     courseName: z.string(),
     courseCode: z.string().optional()
-  }).passthrough())
+  }).passthrough()).optional()
 }).passthrough();
 
 export const CoursesResultSchema = z.object({
@@ -88,6 +89,9 @@ export const AnnouncementSchema = z.object({
   title: z.string(),
   postedAt: z.string().optional(),
   body: z.string(),
+  contentStatus: z.enum(["full", "unavailable"]).optional(),
+  attachments: z.array(LinkSchema).optional(),
+  warning: z.string().optional(),
   url: z.string().optional(),
   source: z.string()
 }).passthrough();

@@ -134,7 +134,7 @@ function requireLocalAuthUi(req: Request, res: Response): boolean {
 
 app.get("/auth", async (req: Request, res: Response) => {
   if (!requireLocalAuthUi(req, res)) return;
-  const status = await sharedBrowser.authStatus({ navigate: false }).catch((error) => ({
+  const status = await sharedBrowser.authStatus({ navigate: false, force: true }).catch((error) => ({
     ok: false,
     authenticated: false,
     state: "UNKNOWN" as const,
@@ -148,7 +148,7 @@ app.get("/auth", async (req: Request, res: Response) => {
 
 app.get("/auth/status", async (req: Request, res: Response) => {
   if (!requireLocalAuthUi(req, res)) return;
-  res.json(await sharedBrowser.authStatus({ navigate: false }).catch((error) => ({
+  res.json(await sharedBrowser.authStatus({ navigate: false, force: true }).catch((error) => ({
     ok: false,
     authenticated: false,
     state: "UNKNOWN",
@@ -179,10 +179,10 @@ app.post("/auth/start", async (req: Request, res: Response) => {
 app.post("/auth/wait", async (req: Request, res: Response) => {
   if (!requireLocalAuthUi(req, res)) return;
   const deadline = Date.now() + 120_000;
-  let status = await sharedBrowser.authStatus({ navigate: false });
+  let status = await sharedBrowser.authStatus({ navigate: false, force: true });
   while (!status.authenticated && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 2_000));
-    status = await sharedBrowser.authStatus({ navigate: false });
+    status = await sharedBrowser.authStatus({ navigate: false, force: true });
   }
   res.json(status);
 });

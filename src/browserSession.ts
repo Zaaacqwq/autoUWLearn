@@ -3,7 +3,7 @@ import path from "node:path";
 import { chromium, type BrowserContext, type Page } from "playwright";
 import type { AuthStatus, AuthState } from "./authTypes.js";
 import { config } from "./config.js";
-import type { FetchTextResult } from "./types.js";
+import type { FetchTextResult, RenderedPageResult } from "./types.js";
 
 interface PageFetchResult extends FetchTextResult {
   redirected: boolean;
@@ -13,7 +13,11 @@ export class BrowserSession {
   private context?: BrowserContext;
   private contextPromise?: Promise<BrowserContext>;
   private currentHeadless?: boolean;
-  private navigationQueue: Promise<unknown> = Promise.resolve();
+  private authPage?: Page;
+  private cachedAuth?: { status: AuthStatus; expiresAt: number };
+  private activeDataPages = 0;
+  private readonly dataPageWaiters: Array<() => void> = [];
+  private readonly maxDataPages = 3;
 
   async ensureContext(options: { headless?: boolean } = {}): Promise<BrowserContext> {
     if (this.context && options.headless === undefined) return this.context;
@@ -52,46 +56,48 @@ export class BrowserSession {
 
   async ensurePage(options: { headless?: boolean } = {}): Promise<Page> {
     const context = await this.ensureContext(options);
-    const existing = context.pages().find((page) => !page.isClosed());
-    if (existing) return existing;
-    return context.newPage();
+    if (this.authPage && !this.authPage.isClosed()) return this.authPage;
+    this.authPage = context.pages().find((page) => !page.isClosed()) ?? (await context.newPage());
+    this.authPage.on("close", () => {
+      this.authPage = undefined;
+    });
+    return this.authPage;
   }
 
   async openLogin(): Promise<{ url: string; title: string }> {
-    return this.withNavigationLock(async () => {
-      const page = await this.ensurePage({ headless: false });
-      await page.goto(new URL("/d2l/home", config.learnBaseUrl).toString(), {
-        waitUntil: "domcontentloaded"
-      });
-      return { url: page.url(), title: await page.title() };
+    const page = await this.ensurePage({ headless: false });
+    await page.goto(new URL("/d2l/home", config.learnBaseUrl).toString(), {
+      waitUntil: "domcontentloaded"
     });
+    return { url: page.url(), title: await page.title() };
   }
 
   async startManualLogin(): Promise<AuthStatus> {
+    this.cachedAuth = undefined;
     await this.openLogin();
-    return this.authStatus({ navigate: false });
+    return this.authStatus({ navigate: false, force: true });
   }
 
-  async authStatus(options: { navigate?: boolean } = {}): Promise<AuthStatus> {
-    return this.withNavigationLock(async () => {
-      const page = await this.ensurePage();
-      if (options.navigate !== false) {
-        await page.goto(new URL("/d2l/home", config.learnBaseUrl).toString(), {
-          waitUntil: "domcontentloaded"
-        });
-      }
-      return this.authStatusFromPage(page);
-    });
+  async authStatus(options: { navigate?: boolean; force?: boolean } = {}): Promise<AuthStatus> {
+    if (!options.force && this.cachedAuth && this.cachedAuth.expiresAt > Date.now()) {
+      return this.cachedAuth.status;
+    }
+    const page = await this.ensurePage();
+    if (options.navigate !== false) {
+      await page.goto(new URL("/d2l/home", config.learnBaseUrl).toString(), {
+        waitUntil: "domcontentloaded"
+      });
+    }
+    const status = await this.authStatusFromPage(page);
+    this.cachedAuth = { status, expiresAt: Date.now() + 30_000 };
+    return status;
   }
 
   async fetchText(url: string, init?: { headers?: Record<string, string> }): Promise<FetchTextResult> {
-    return this.withNavigationLock(() => this.fetchTextUnlocked(url, init));
+    return this.withDataPage((page) => this.fetchTextWithPage(page, url, init));
   }
 
-  private async fetchTextUnlocked(url: string, init?: { headers?: Record<string, string> }): Promise<FetchTextResult> {
-    const page = await this.ensurePage();
-    await this.ensureLearnOrigin(page);
-
+  private async fetchTextWithPage(page: Page, url: string, init?: { headers?: Record<string, string> }): Promise<FetchTextResult> {
     await page.setExtraHTTPHeaders(init?.headers ?? {});
     const response = await page.goto(url, {
       waitUntil: "domcontentloaded"
@@ -109,18 +115,81 @@ export class BrowserSession {
     };
   }
 
-  private async withNavigationLock<T>(operation: () => Promise<T>): Promise<T> {
-    const previous = this.navigationQueue;
-    let release!: () => void;
-    this.navigationQueue = new Promise<void>((resolve) => {
-      release = resolve;
+  async fetchRendered(url: string): Promise<RenderedPageResult> {
+    return this.withDataPage(async (page) => {
+      const response = await page.goto(url, { waitUntil: "domcontentloaded" });
+      if (!response) throw new Error(`No response while navigating to ${url}`);
+      await page
+        .waitForFunction(() =>
+          [...document.querySelectorAll("d2l-html-block")].some(
+            (element) => element.shadowRoot?.textContent?.trim()
+          )
+        )
+        .catch(() => undefined);
+
+      const rendered = await page.evaluate(() => {
+        const blocks = [...document.querySelectorAll("d2l-html-block")].map((element) => {
+          const root = element.shadowRoot;
+          return {
+            text: root
+              ? [...root.children]
+                  .map((child) => (child as HTMLElement).innerText || child.textContent || "")
+                  .join("\n")
+                  .trim()
+              : "",
+            links: root
+              ? [...root.querySelectorAll("a[href]")].map((anchor) => ({
+                  label: (anchor.textContent ?? "").replace(/\s+/g, " ").trim(),
+                  url: (anchor as HTMLAnchorElement).href
+                }))
+              : []
+          };
+        });
+        return {
+          title: document.title,
+          renderedText: document.body.innerText,
+          shadowBlocks: blocks
+        };
+      });
+
+      return {
+        url: response.url(),
+        status: response.status(),
+        ok: response.ok(),
+        contentType: response.headers()["content-type"] ?? "",
+        text: await response.text().catch(() => ""),
+        ...rendered
+      };
     });
-    await previous.catch(() => undefined);
+  }
+
+  private async withDataPage<T>(operation: (page: Page) => Promise<T>): Promise<T> {
+    await this.acquireDataPageSlot();
+    let page: Page | undefined;
     try {
-      return await operation();
+      const context = await this.ensureContext();
+      page = await context.newPage();
+      page.setDefaultNavigationTimeout(Math.min(config.navigationTimeoutMs, 10_000));
+      page.setDefaultTimeout(Math.min(config.navigationTimeoutMs, 10_000));
+      return await operation(page);
     } finally {
-      release();
+      await page?.close().catch(() => undefined);
+      this.releaseDataPageSlot();
     }
+  }
+
+  private async acquireDataPageSlot(): Promise<void> {
+    if (this.activeDataPages < this.maxDataPages) {
+      this.activeDataPages += 1;
+      return;
+    }
+    await new Promise<void>((resolve) => this.dataPageWaiters.push(resolve));
+    this.activeDataPages += 1;
+  }
+
+  private releaseDataPageSlot(): void {
+    this.activeDataPages -= 1;
+    this.dataPageWaiters.shift()?.();
   }
 
   async download(url: string, destinationPath: string): Promise<{
@@ -151,6 +220,8 @@ export class BrowserSession {
   async close(): Promise<void> {
     await this.context?.close();
     this.context = undefined;
+    this.authPage = undefined;
+    this.cachedAuth = undefined;
     this.currentHeadless = undefined;
   }
 
@@ -182,6 +253,7 @@ export class BrowserSession {
     const backupPath = `${config.profileDir}.bak-${Date.now()}`;
     await fs.rename(config.profileDir, backupPath).catch(() => undefined);
     await fs.rm(config.storageStatePath, { force: true }).catch(() => undefined);
+    this.cachedAuth = undefined;
     return {
       ok: false,
       authenticated: false,
@@ -191,22 +263,6 @@ export class BrowserSession {
       message: `Session profile reset. Previous profile moved to ${backupPath}; saved storage state deleted. Start login again.`,
       authUrl: config.authUrl
     };
-  }
-
-  private async ensureLearnOrigin(page: Page): Promise<void> {
-    const learnHost = new URL(config.learnBaseUrl).hostname;
-    const current = page.url();
-    let currentHost: string | undefined;
-    try {
-      currentHost = current === "about:blank" ? undefined : new URL(current).hostname;
-    } catch {
-      currentHost = undefined;
-    }
-    if (currentHost === learnHost) return;
-
-    await page.goto(new URL("/d2l/home", config.learnBaseUrl).toString(), {
-      waitUntil: "domcontentloaded"
-    });
   }
 
   private async authStatusFromPage(page: Page): Promise<AuthStatus> {

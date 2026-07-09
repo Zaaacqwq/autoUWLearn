@@ -1,6 +1,6 @@
 import * as cheerio from "cheerio";
 import { absoluteLearnUrl } from "./config.js";
-import type { ContentModule, ContentTopic, Course, LinkItem } from "./types.js";
+import type { ContentModule, ContentTopic, Course, LinkItem, RenderedPageResult } from "./types.js";
 
 const whitespace = /\s+/g;
 
@@ -166,6 +166,37 @@ export function parseContentItem(html: string): {
   });
   const text = cleanText($("body").text());
   return { title, text, links, fileUrls: [...fileUrls] };
+}
+
+export function parseAnnouncementDetail(page: RenderedPageResult): {
+  body: string;
+  attachments: LinkItem[];
+  contentStatus: "full" | "unavailable";
+  warning?: string;
+} {
+  const contentBlocks = page.shadowBlocks
+    .map((block) => ({
+      text: cleanMultiline(block.text),
+      links: block.links.filter((link) => link.label && /^https?:/i.test(link.url))
+    }))
+    .filter((block) => block.text);
+  const body = contentBlocks.map((block) => block.text).join("\n\n").trim();
+  const attachments = dedupeLinks(contentBlocks.flatMap((block) => block.links));
+  if (body) return { body, attachments, contentStatus: "full" };
+  return {
+    body: "",
+    attachments,
+    contentStatus: "unavailable",
+    warning: "The announcement detail page loaded, but its rendered body was unavailable."
+  };
+}
+
+function cleanMultiline(value: string): string {
+  return value
+    .split(/\n+/)
+    .map((line) => cleanText(line))
+    .filter(Boolean)
+    .join("\n");
 }
 
 export function parseTableLikePage(html: string): {

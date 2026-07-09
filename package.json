@@ -17,7 +17,7 @@
     "start:http": "node dist/httpServer.js",
     "start:http:mac": "bash scripts/start-http.sh",
     "typecheck": "tsc --noEmit",
-    "test": "npm run typecheck"
+    "test": "npm run typecheck && node --import tsx --test src/*.test.ts"
   },
   "repository": {
     "type": "git",

@@ -8,6 +8,15 @@ export interface FetchTextResult {
   text: string;
 }
 
+export interface RenderedPageResult extends FetchTextResult {
+  title: string;
+  renderedText: string;
+  shadowBlocks: Array<{
+    text: string;
+    links: LinkItem[];
+  }>;
+}
+
 export interface LinkItem {
   label: string;
   url: string;
@@ -61,6 +70,9 @@ export interface Announcement {
   title: string;
   postedAt?: string;
   body: string;
+  contentStatus?: "full" | "unavailable";
+  attachments?: LinkItem[];
+  warning?: string;
   url?: string;
   source: string;
 }
