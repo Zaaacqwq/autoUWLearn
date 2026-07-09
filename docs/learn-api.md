@@ -37,9 +37,38 @@ reads. Versions: `le` 1.95, `lp` 1.61.
 | `/d2l/api/le/{le}/{ou}/news/` | Announcements incl. body |
 | `/d2l/api/le/{le}/{ou}/content/toc` | Content tree |
 | `/content/enforced/...` | Course files (PDF etc.) |
+| `/d2l/api/le/{le}/{ou}/calendar/events/?startDateTime=&endDateTime=` | **Every deadline.** See below |
 
-Not usable: `/quizzes/{id}/attempts/` (403), `/calendar/events/myEvents/` (400/404),
-`/d2l/api/le/unstable/*` (404).
+Not usable: `/quizzes/{id}/attempts/` (403), `/dropbox/folders/{id}/submissions/` (403),
+`/calendar/events/myEvents/` (400), `/d2l/api/le/unstable/*` (404).
+
+### Calendar events — the only complete deadline source
+
+Both date bounds are required; without them the endpoint returns `200 []`, which
+reads like "no events" rather than "you forgot the range". Scoped per org unit.
+
+`EventType` is an enum:
+
+| Value | Meaning | Associated entity |
+|---|---|---|
+| 1 | Plain event, e.g. a scheduled lab session | none |
+| 2 | Availability starts | Quiz, Dropbox |
+| 3 | Availability ends | Quiz, Dropbox |
+| **6** | **Due** | **ModuleCO, Quiz, Dropbox** |
+| 8 | Discussion forum | DiscussionForum |
+
+`EventType === 6` is the deadline set. `AssociatedEntity.AssociatedEntityId`
+links back to the quiz or dropbox folder, which is how a deadline gets joined to
+its submission status.
+
+This is strictly larger than `dropbox/folders` ∪ `quizzes`. ECE 380's
+`Assignment 4` (due Jul 15) is `AssociatedEntityType:
+D2L.LE.Content.ContentObject.ModuleCO` — a **content module** with a due date. It
+lives in an org unit whose dropbox folder list is empty, so no amount of querying
+`dropbox/folders` or `quizzes` would ever surface it.
+
+Note that a course's deadlines may live in a different org unit than its
+assignments: ECE 380's calendar events are split across both of its org units.
 
 ## Server-rendered pages (status)
 
@@ -76,33 +105,26 @@ Shows `Attempt 1 — <score>` or `Attempt 1 — Pending Evaluation`, and a
 "have not taken" phrase when unattempted. Only needed when the per-attempt score
 matters; the list page above is cheaper.
 
-### Calendar — `/d2l/le/calendar/{ou}`
+### Calendar list view — `/d2l/le/calendar/{ou}`
 
-**Returns events for every enrolled course, not just `{ou}`.** One request covers
-everything. Event types: Dropbox, Checklists, Discussions, Events, Grades,
-Materials, Modules, Quizzes, Surveys.
-
-This is the **only complete source of due dates**. It carries deadlines the
-Valence API does not expose at all:
-
-- `Assignment 4 - Due — ECE 380 — Jul 15, 2026 11:59 PM` exists in no dropbox
-  folder and no quiz in either ECE 380 org unit. It is a grade item with a due
-  date, and grade objects carry no date field.
-- Class and lab sessions: `ECE 380 Lab — Jul 9, 8:00 AM - 12:00 PM`.
-- Late dropboxes as separate items: `Oral Assignment (LATE) Dropbox`.
-
-It also distinguishes `X - Due` from `X - Availability Ends`, which the current
-code conflates by falling back from `DueDate` to `Availability.EndDate`.
-
-Open question: how to bound the calendar's date range. The list view paginates
-with Previous/Next; the range parameters were not captured.
+Renders events for **every** enrolled course, not just `{ou}`. Useful for
+eyeballing, but do not scrape it: the JSON `calendar/events/` endpoint above
+carries the same data, and paging this view issues
+`POST /d2l/le/calendar/{ou}/listviewfilter/save`, which mutates server-side
+per-user filter state.
 
 ## Consequences for this repo
 
 1. `learn_due_dates` reads dropbox folders + quizzes, so it **silently misses
-   grade-item deadlines**. Verified: ECE 380 Assignment 4, due Jul 15, absent
-   from the tool's output.
+   deadlines attached to anything else**. Verified: ECE 380 Assignment 4, due
+   Jul 15, is a content-module deadline and is absent from the tool's output.
+   Fix: source deadlines from `calendar/events/` with `EventType === 6`.
 2. Nothing exposes submission status, so "did I submit this?" cannot be answered.
    A model asked it will try to infer from "no grade yet", which is wrong: a
-   submitted, ungraded quiz has no grade.
+   submitted, ungraded quiz has no grade. Fix: parse the two list pages and join
+   on `AssociatedEntity.AssociatedEntityId`.
 3. `dueAt` is emitted as a UTC instant with no timezone hint for the model.
+
+Deadlines come from JSON. Only submission status requires HTML, and there it is
+stated in plain words (`Not Submitted`, `0 / 1`) rather than inferred, which is
+what made the old HTML due-date parsing fragile.
