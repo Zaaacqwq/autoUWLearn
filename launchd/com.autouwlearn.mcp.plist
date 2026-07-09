@@ -5,11 +5,29 @@
   <key>Label</key>
   <string>com.autouwlearn.mcp</string>
 
+  <!--
+    Run the launcher script rather than node directly. The script sources
+    .local/server.env (OAuth password, public base URL) and sets
+    LEARN_MCP_ALLOWED_HOSTS, without which requests arriving through the
+    Cloudflare tunnel are rejected with 403 by the MCP SDK's DNS-rebinding
+    protection.
+
+    Do not add LEARN_* entries to EnvironmentVariables below: the script reads
+    every setting as ${VAR:-default}, so anything exported here silently wins
+    over both server.env and the script's own defaults. That is how this service
+    ended up running headful with no OAuth password configured.
+
+    The script path must stay RELATIVE to WorkingDirectory, and the job must be
+    spawned through /bin/zsh. This repo lives under ~/Documents, which macOS
+    guards with TCC: a launchd job resolving an absolute path through that
+    directory is denied with EPERM ("Operation not permitted"), while a relative
+    path from the working directory launchd already opened is allowed.
+  -->
   <key>ProgramArguments</key>
   <array>
     <string>/bin/zsh</string>
     <string>-lc</string>
-    <string>cd /Users/user/Documents/Code/autoUWLearn &amp;&amp; exec env PATH=/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin LEARN_MCP_HOST=127.0.0.1 LEARN_MCP_PORT=8787 LEARN_HEADLESS=false LEARN_BASE_URL=https://learn.uwaterloo.ca LEARN_PROFILE_DIR=/Users/user/Documents/Code/autoUWLearn/.local/learn-browser-profile LEARN_DOWNLOAD_DIR=/Users/user/Documents/Code/autoUWLearn/.local/learn-downloads /opt/homebrew/bin/node dist/httpServer.js</string>
+    <string>exec bash scripts/start-http.sh</string>
   </array>
 
   <key>WorkingDirectory</key>
@@ -19,18 +37,6 @@
   <dict>
     <key>PATH</key>
     <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
-    <key>LEARN_MCP_HOST</key>
-    <string>127.0.0.1</string>
-    <key>LEARN_MCP_PORT</key>
-    <string>8787</string>
-    <key>LEARN_HEADLESS</key>
-    <string>false</string>
-    <key>LEARN_BASE_URL</key>
-    <string>https://learn.uwaterloo.ca</string>
-    <key>LEARN_PROFILE_DIR</key>
-    <string>/Users/user/Documents/Code/autoUWLearn/.local/learn-browser-profile</string>
-    <key>LEARN_DOWNLOAD_DIR</key>
-    <string>/Users/user/Documents/Code/autoUWLearn/.local/learn-downloads</string>
   </dict>
 
   <key>RunAtLoad</key>
@@ -38,6 +44,9 @@
 
   <key>KeepAlive</key>
   <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
 
   <key>StandardOutPath</key>
   <string>/tmp/autouwlearn-mcp.log</string>

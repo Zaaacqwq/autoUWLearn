@@ -1,0 +1,49 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.cloudflared.macmini</string>
+
+  <!--
+    Runs the "mac-mini" tunnel, which is what mcp.example.com is routed to.
+
+    The system-wide LaunchDaemon at /Library/LaunchDaemons/com.cloudflare.cloudflared.plist
+    invokes the bare `cloudflared` binary with no subcommand, so it only ever
+    prints "Use `cloudflared tunnel run` to start tunnel mac-mini" -- the tunnel
+    never connects and Cloudflare answers 530 for want of an origin. That daemon
+    serves a different tunnel ("openwebui") and is deliberately left alone.
+
+    This runs as the logged-in user because every credential the mac-mini tunnel
+    needs already lives in ~/.cloudflared: config.yml, the tunnel credentials
+    JSON, and cert.pem. No sudo, and no DNS changes.
+
+    Rollback: launchctl bootout gui/$(id -u)/com.cloudflared.macmini
+  -->
+  <key>ProgramArguments</key>
+  <array>
+    <string>/opt/homebrew/bin/cloudflared</string>
+    <string>--config</string>
+    <string>/Users/user/.cloudflared/config.yml</string>
+    <string>--no-autoupdate</string>
+    <string>tunnel</string>
+    <string>run</string>
+    <string>mac-mini</string>
+  </array>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>ThrottleInterval</key>
+  <integer>10</integer>
+
+  <key>StandardOutPath</key>
+  <string>/tmp/cloudflared-macmini.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>/tmp/cloudflared-macmini.err.log</string>
+</dict>
+</plist>
