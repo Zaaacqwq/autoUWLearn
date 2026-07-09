@@ -40,6 +40,11 @@ const app = createMcpExpressApp({
 });
 const sharedBrowser = new BrowserSession();
 
+// Registering the tools populates the doc registry that /tools.json and
+// /openapi.json read. Without this they serve an empty list until the first MCP
+// session happens to connect. The server object itself is intentionally unused.
+void createLearnMcpServer(sharedBrowser);
+
 /**
  * Brightspace signs a session out once it goes quiet, and offers no dedicated
  * keep-alive endpoint — any authenticated request counts as activity. Make one

@@ -278,3 +278,17 @@ test("learn_read_content reports not_found for a topic that does not exist", asy
     assert.equal((result.structuredContent as any).status, "not_found");
   });
 });
+
+test("registering the tools populates the doc registry that /tools.json serves", async () => {
+  // httpServer.ts registers the tools at module scope purely for this side
+  // effect. It looks like dead code; deleting it empties /tools.json and
+  // /openapi.json until an MCP session happens to connect.
+  const { getToolDocs } = await import("./toolRegistry.js");
+  const service = createLearnService({ api: fakeApi(), now: () => NOW });
+  createLearnMcpServer(new FakeBrowser(), { service });
+
+  const names = getToolDocs().map((doc) => doc.name);
+  assert.ok(names.includes("learn_due_dates"), "learn_due_dates should be documented");
+  assert.ok(names.includes("learn_read_content"));
+  assert.ok(getToolDocs().every((doc) => doc.inputSchema), "every tool documents its input");
+});
