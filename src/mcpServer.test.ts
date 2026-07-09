@@ -31,7 +31,7 @@ function fakeApi(overrides: { failAll?: Error } = {}) {
     getJson: async () => ({}),
     courses: async () => guard(coursesPayload),
     assignments: async (ou: string | number) =>
-      guard(String(ou) === "2002" ? [{ Id: 406030, Name: "Lab1.Post-lab.205", DueDate: day(2) }] : []),
+      guard(String(ou) === "2002" ? [{ Id: 4001, Name: "Lab1.Post-lab", DueDate: day(2) }] : []),
     quizzes: async (ou: string | number) =>
       guard({ Objects: String(ou) === "2002" ? [{ QuizId: 9, Name: "Prelab4", DueDate: day(4), IsActive: true }] : [] }),
     grades: async (ou: string | number) =>
@@ -39,7 +39,7 @@ function fakeApi(overrides: { failAll?: Error } = {}) {
         String(ou) === "2002"
           ? [
               {
-                GradeObjectName: "Lab1.Post-lab.205",
+                GradeObjectName: "Lab1.Post-lab",
                 DisplayedGrade: "77 %",
                 PointsNumerator: 77,
                 PointsDenominator: 100,
@@ -65,7 +65,7 @@ function fakeApi(overrides: { failAll?: Error } = {}) {
                   Title: "Lectures",
                   Topics: [
                     {
-                      TopicId: 6534618,
+                      TopicId: 3001,
                       Title: "01-introduction",
                       TypeIdentifier: "File",
                       Url: "/content/enforced/2001-ECE318/01-introduction.pdf"
@@ -136,7 +136,7 @@ test("learn_due_dates answers 'what is due this week' without disambiguation", a
 
     const content = result.structuredContent as any;
     assert.equal(content.status, "ok");
-    assert.deepEqual(content.items.map((i: any) => i.title), ["Lab1.Post-lab.205", "Prelab4"]);
+    assert.deepEqual(content.items.map((i: any) => i.title), ["Lab1.Post-lab", "Prelab4"]);
     assert.deepEqual(content.items.map((i: any) => i.type), ["assignment", "quiz"]);
     assert.equal(content.items[0].courseLabel, "ECE 318");
   });
@@ -161,7 +161,7 @@ test("learn_due_dates honours the daysAhead window", async () => {
   await withClient(async (client) => {
     const result = await client.callTool({ name: "learn_due_dates", arguments: { daysAhead: 3 } });
     const content = result.structuredContent as any;
-    assert.deepEqual(content.items.map((i: any) => i.title), ["Lab1.Post-lab.205"]);
+    assert.deepEqual(content.items.map((i: any) => i.title), ["Lab1.Post-lab"]);
   });
 });
 
@@ -172,7 +172,7 @@ test("learn_grades takes a course query, not an org unit id", async () => {
 
     const content = result.structuredContent as any;
     assert.equal(content.itemCount, 1);
-    assert.equal(content.items[0].name, "Lab1.Post-lab.205");
+    assert.equal(content.items[0].name, "Lab1.Post-lab");
     assert.equal(content.items[0].displayedGrade, "77 %");
     assert.deepEqual(content.items[0].points, { earned: 77, possible: 100 });
   });

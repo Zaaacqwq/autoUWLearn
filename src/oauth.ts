@@ -40,8 +40,17 @@ const authorizationCodes = new Map<string, AuthorizationCode>();
 const accessTokens = new Map<string, AccessToken>();
 loadTokenStore();
 
+/**
+ * Required, with no default. A fallback here would make a misconfigured deploy
+ * publish OAuth metadata pointing at whoever's hostname was baked in, and
+ * clients would send their tokens there.
+ */
 export function publicBaseUrl(): string {
-  return (process.env.LEARN_MCP_PUBLIC_BASE_URL ?? "https://mcp.example.com").replace(/\/+$/, "");
+  const configured = process.env.LEARN_MCP_PUBLIC_BASE_URL;
+  if (!configured) {
+    throw new Error("LEARN_MCP_PUBLIC_BASE_URL is not set. Configure it before serving OAuth metadata.");
+  }
+  return configured.replace(/\/+$/, "");
 }
 
 export function resourceUrl(): string {

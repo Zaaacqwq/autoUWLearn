@@ -3,32 +3,32 @@
 <plist version="1.0">
 <dict>
   <key>Label</key>
-  <string>com.cloudflared.macmini</string>
+  <string>com.cloudflared.tunnel</string>
 
   <!--
-    Runs the "mac-mini" tunnel, which is what mcp.example.com is routed to.
+    Runs the "__TUNNEL_NAME__" tunnel, which is what your MCP hostname is routed to.
 
     The system-wide LaunchDaemon at /Library/LaunchDaemons/com.cloudflare.cloudflared.plist
     invokes the bare `cloudflared` binary with no subcommand, so it only ever
-    prints "Use `cloudflared tunnel run` to start tunnel mac-mini" -- the tunnel
+    prints "Use `cloudflared tunnel run` to start tunnel __TUNNEL_NAME__" -- the tunnel
     never connects and Cloudflare answers 530 for want of an origin. That daemon
-    serves a different tunnel ("openwebui") and is deliberately left alone.
+    serves a different tunnel (a different tunnel) and is deliberately left alone.
 
-    This runs as the logged-in user because every credential the mac-mini tunnel
+    This runs as the logged-in user because every credential the __TUNNEL_NAME__ tunnel
     needs already lives in ~/.cloudflared: config.yml, the tunnel credentials
     JSON, and cert.pem. No sudo, and no DNS changes.
 
-    Rollback: launchctl bootout gui/$(id -u)/com.cloudflared.macmini
+    Rollback: launchctl bootout gui/$(id -u)/com.cloudflared.tunnel
   -->
   <key>ProgramArguments</key>
   <array>
     <string>/opt/homebrew/bin/cloudflared</string>
     <string>--config</string>
-    <string>/Users/user/.cloudflared/config.yml</string>
+    <string>__CLOUDFLARED_CONFIG__</string>
     <string>--no-autoupdate</string>
     <string>tunnel</string>
     <string>run</string>
-    <string>mac-mini</string>
+    <string>__TUNNEL_NAME__</string>
   </array>
 
   <key>RunAtLoad</key>
@@ -41,9 +41,9 @@
   <integer>10</integer>
 
   <key>StandardOutPath</key>
-  <string>/tmp/cloudflared-macmini.log</string>
+  <string>/tmp/cloudflared-tunnel.log</string>
 
   <key>StandardErrorPath</key>
-  <string>/tmp/cloudflared-macmini.err.log</string>
+  <string>/tmp/cloudflared-tunnel.err.log</string>
 </dict>
 </plist>

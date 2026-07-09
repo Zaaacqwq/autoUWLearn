@@ -61,7 +61,7 @@ export function openApiSpec() {
       description:
         "Documentation view for UW LEARN MCP tools. These are MCP tools, not direct REST endpoints; call them through the MCP endpoint /mcp."
     },
-    servers: [{ url: "https://mcp.example.com/mcp", description: "MCP endpoint" }],
+    servers: [{ url: process.env.LEARN_MCP_RESOURCE_URL ?? "/mcp", description: "MCP endpoint" }],
     paths
   };
 }

@@ -172,7 +172,7 @@ test("grades carry the item name and displayed grade", async () => {
     grades: {
       "101": [
         {
-          GradeObjectName: "Lab1.Post-lab.205",
+          GradeObjectName: "Lab1.Post-lab",
           DisplayedGrade: "77 %",
           PointsNumerator: 77,
           PointsDenominator: 100,
@@ -185,7 +185,7 @@ test("grades carry the item name and displayed grade", async () => {
 
   const { items } = await svc.grades();
   assert.equal(items.length, 1);
-  assert.equal(items[0].name, "Lab1.Post-lab.205");
+  assert.equal(items[0].name, "Lab1.Post-lab");
   assert.equal(items[0].displayedGrade, "77 %");
   assert.deepEqual(items[0].points, { earned: 77, possible: 100 });
   assert.deepEqual(items[0].weight, { earned: 7.7, possible: 10 });

@@ -1,7 +1,7 @@
 /**
  * Live smoke test for the content tools.
  *
- *   npx tsx scripts/smoke-learn-content.ts [courseQuery] [topicQuery]
+ *   npx tsx scripts/smoke-learn-content.ts "ECE 101" introduction
  *
  * Read-only. Lists a course's files and reads one, printing only a short
  * excerpt so lecture material is not dumped into a terminal log.
@@ -12,8 +12,13 @@ import { cookieHeaderFromStorageState } from "../src/cookieSource.js";
 import { createLearnApi } from "../src/learnApi.js";
 import { createLearnService } from "../src/learnService.js";
 
-const courseQuery = process.argv[2] ?? "ECE 327";
-const topicQuery = process.argv[3] ?? "introduction";
+const courseQuery = process.argv[2];
+const topicQuery = process.argv[3] ?? "";
+
+if (!courseQuery || !topicQuery) {
+  console.error("usage: npx tsx scripts/smoke-learn-content.ts <courseQuery> <topicQuery>");
+  process.exit(1);
+}
 
 const storageState =
   process.env.LEARN_STORAGE_STATE_PATH ?? path.resolve(os.homedir(), ".uwlearn-mcp", "storage-state.json");

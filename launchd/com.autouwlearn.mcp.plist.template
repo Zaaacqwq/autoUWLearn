@@ -31,7 +31,7 @@
   </array>
 
   <key>WorkingDirectory</key>
-  <string>/Users/user/Documents/Code/autoUWLearn</string>
+  <string>__REPO_DIR__</string>
 
   <key>EnvironmentVariables</key>
   <dict>

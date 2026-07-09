@@ -5,11 +5,11 @@ import { flattenToc, type RawModule } from "./contentTree.js";
 // Shape taken from the live /d2l/api/le/1.95/{ou}/content/toc payload.
 const toc: RawModule[] = [
   {
-    ModuleId: 6534617,
+    ModuleId: 3002,
     Title: "Lectures",
     Topics: [
       {
-        TopicId: 6534618,
+        TopicId: 3001,
         Title: "01-ece327-s2026-introduction",
         TypeIdentifier: "File",
         Url: "/content/enforced/2005-ECE327/01-ece327-s2026-introduction.pdf"

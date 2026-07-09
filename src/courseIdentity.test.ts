@@ -11,7 +11,7 @@ const orgUnits: OrgUnit[] = [
   { orgUnitId: "2005", code: "ECE327_lect_1265", name: "ECE 327 - Spring 2026", isActive: true },
   { orgUnitId: "2006", code: "ECE380_sectb_1265", name: "ECE 380 - Spring 2026", isActive: true },
   { orgUnitId: "2002", code: "ECE318_lab_1265", name: "ECE 318 Lab - Spring 2026", isActive: true },
-  { orgUnitId: "930839", code: "Engineering Co-op Community", name: "Engineering Co-op Community", isActive: true }
+  { orgUnitId: "2008", code: "Engineering Co-op Community", name: "Engineering Co-op Community", isActive: true }
 ];
 
 test("parses subject, number and term out of a LEARN course code", () => {
@@ -33,7 +33,7 @@ test("merges the org units of one course into a single course", () => {
   assert.ok(ece318, "ECE318 should exist");
   assert.equal(ece318.label, "ECE 318");
   assert.equal(ece318.orgUnitIds.length, 2, "lecture and lab are one course");
-  assert.deepEqual([...ece318.orgUnitIds].sort(), ["2002", "2001"]);
+  assert.deepEqual([...ece318.orgUnitIds].sort(), ["2001", "2002"]);
 });
 
 test("keeps each org unit as a distinct component so its data stays addressable", () => {
@@ -45,7 +45,7 @@ test("keeps each org unit as a distinct component so its data stays addressable"
 test("merges two sections that share a name but differ by instructor", () => {
   const ece380 = mergeOrgUnits(orgUnits).find((c) => c.key === "ECE380");
   assert.equal(ece380?.orgUnitIds.length, 2);
-  assert.deepEqual([...(ece380?.orgUnitIds ?? [])].sort(), ["2006", "2004"]);
+  assert.deepEqual([...(ece380?.orgUnitIds ?? [])].sort(), ["2004", "2006"]);
 });
 
 test("an org unit with no course code becomes its own course", () => {
