@@ -99,12 +99,14 @@ Every read takes an optional `courseQuery` such as `ECE 318`, `ece318` or `318`.
 | Tool | Answers |
 |---|---|
 | `learn_courses` | Which courses am I in? |
-| `learn_due_dates` | What is due this week? (assignments + quizzes, next N days) |
+| `learn_due_dates` | What is due, and did I submit it? (next N days) |
 | `learn_grades` | How am I doing? (released grades only) |
 | `learn_announcements` | What is the latest announcement? |
 | `learn_content` | What lecture slides and handouts exist? |
 | `learn_read_content` | What does that lecture actually say? (PDF → text) |
 | `learn_auth_status` / `learn_auth_start` / `learn_auth_save` / `learn_auth_reset` | Session management |
+
+`learn_due_dates` unions three sources, because none is complete on its own: calendar events, assignment folders and quizzes. A deadline can hang off a content module, which the latter two cannot express; and a course's quizzes can be dated while its calendar is empty. Each item carries `submissionStatus`, read from LEARN's list pages — the Valence API exposes no per-student status, so a caller must never infer "not submitted" from the absence of a grade.
 
 A query matching several courses or topics returns the candidates rather than silently picking one. One org unit failing (a lab you cannot see, a transient error) is reported in `errors[]` while the rest of the data still returns.
 
