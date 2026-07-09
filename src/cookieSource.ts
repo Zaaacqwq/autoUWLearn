@@ -18,10 +18,26 @@ export class MissingSessionCookiesError extends Error {
   }
 }
 
-interface StorageStateCookie {
+export interface SessionCookie {
   readonly name: string;
   readonly value: string;
   readonly domain: string;
+}
+
+type StorageStateCookie = SessionCookie;
+
+/**
+ * Renders a Cookie header from an already-loaded cookie jar, whichever side it
+ * came from (a live browser context, or the storage state on disk).
+ */
+export function cookieHeaderFromCookies(cookies: readonly SessionCookie[], host: string): string {
+  const relevant = cookies.filter((cookie) => matchesHost(cookie.domain, host));
+
+  const present = new Set(relevant.map((cookie) => cookie.name));
+  const missing = REQUIRED_SESSION_COOKIES.filter((name) => !present.has(name));
+  if (missing.length > 0) throw new MissingSessionCookiesError(missing);
+
+  return relevant.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
 }
 
 function matchesHost(cookieDomain: string, host: string): boolean {
@@ -51,11 +67,5 @@ function readCookies(storageStatePath: string): StorageStateCookie[] {
  * returns, and the two demand different responses from the caller.
  */
 export function cookieHeaderFromStorageState(storageStatePath: string, host: string): string {
-  const relevant = readCookies(storageStatePath).filter((cookie) => matchesHost(cookie.domain, host));
-
-  const present = new Set(relevant.map((cookie) => cookie.name));
-  const missing = REQUIRED_SESSION_COOKIES.filter((name) => !present.has(name));
-  if (missing.length > 0) throw new MissingSessionCookiesError(missing);
-
-  return relevant.map((cookie) => `${cookie.name}=${cookie.value}`).join("; ");
+  return cookieHeaderFromCookies(readCookies(storageStatePath), host);
 }

@@ -2,10 +2,15 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { authRequired } from "./authTypes.js";
 import { BrowserSession } from "./browserSession.js";
+import { config } from "./config.js";
+import { MissingSessionCookiesError } from "./cookieSource.js";
+import { createLearnApi, LearnAuthError } from "./learnApi.js";
 import { LearnClient } from "./learnClient.js";
+import { createLearnService, type LearnService } from "./learnService.js";
+import { createCookieHeaderProvider } from "./sessionCookies.js";
 import { recordToolDoc, zodRawShapeToJson } from "./toolRegistry.js";
 import {
-  AnnouncementsResultSchema,
+  AnnouncementsFeedSchema,
   AuthStatusSchema,
   ContentItemResultSchema,
   ContentResultSchema,
@@ -14,8 +19,10 @@ import {
   CoursesResultSchema,
   DashboardSchema,
   DownloadResultSchema,
-  DueDatesSchema,
+  GradesResultSchema,
+  MergedCoursesResultSchema,
   ParsedPageSchema,
+  UpcomingResultSchema,
   schemaToJson
 } from "./toolSchemas.js";
 
@@ -24,8 +31,31 @@ export interface LearnMcpServerHandle {
   browser: BrowserSession;
 }
 
-export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpServerHandle {
+export interface LearnMcpServerDeps {
+  /** Injected by tests; otherwise built from the browser session's cookies. */
+  service?: LearnService;
+}
+
+export function createLearnMcpServer(
+  browser = new BrowserSession(),
+  deps: LearnMcpServerDeps = {}
+): LearnMcpServerHandle {
   const learn = new LearnClient(browser);
+
+  // Reads go straight to the Valence JSON API over the session cookies. The
+  // browser is only needed to establish that session, never to serve a read.
+  const service =
+    deps.service ??
+    createLearnService({
+      api: createLearnApi({
+        baseUrl: config.learnBaseUrl,
+        cookieHeader: createCookieHeaderProvider({
+          liveCookies: () => browser.liveCookies(),
+          storageStatePath: config.storageStatePath,
+          host: new URL(config.learnBaseUrl).hostname
+        })
+      })
+    });
 
   const server = new McpServer({
     name: "autouwlearn",
@@ -86,6 +116,22 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
           }
           return jsonResult(await withToolTimeout(handler(input), name), { structured: Boolean(options.outputSchema) });
         } catch (error) {
+          // A lapsed SSO session surfaces as a 403 from the API or as absent
+          // cookies on disk. Either way the fix is the same: log in again.
+          if (error instanceof LearnAuthError || error instanceof MissingSessionCookiesError) {
+            return jsonResult(
+              authRequired({
+                ok: false,
+                authenticated: false,
+                state: "SESSION_EXPIRED",
+                url: config.learnBaseUrl,
+                title: "",
+                message: error.message,
+                authUrl: config.authUrl
+              }),
+              { isError: true }
+            );
+          }
           const message = error instanceof Error ? error.message : String(error);
           if (message.startsWith("{")) {
             try {
@@ -162,14 +208,13 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
 
   registerReadOnlyTool(
     "learn_courses",
-    "List current visible UW LEARN courses with id, name, code, and URL.",
-    {
-      pageSize: z.number().int().min(1).max(500).default(100).optional(),
-      includeRaw: z.boolean().default(false).optional(),
-      refresh: z.boolean().default(false).optional()
+    "List the user's current UW LEARN courses. Each course merges its org units (lecture, lab, sections) under one label such as 'ECE 318'. Pass a course's label or key to the other tools; never pass an orgUnitId.",
+    {},
+    async () => {
+      const courses = await service.courses();
+      return { count: courses.length, courses };
     },
-    async ({ pageSize, includeRaw, refresh }) => learn.listCourses((pageSize as number | undefined) ?? 100, Boolean(refresh), Boolean(includeRaw)),
-    { outputSchema: CoursesResultSchema }
+    { requiresAuth: false, outputSchema: MergedCoursesResultSchema }
   );
 
   registerReadOnlyTool(
@@ -184,80 +229,60 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
     { outputSchema: CourseResolutionSchema }
   );
 
-  registerReadOnlyTool(
-    "learn_due_items",
-    "Aggregate upcoming due items across active courses or one resolved course. Important: read dueDateLines and items; checkedCourses/courses are only metadata. Default window is the next 14 days.",
-    {
-      courseQuery: z.string().min(1).optional(),
-      daysAhead: z.number().int().min(1).max(180).default(14).optional(),
-      includeRaw: z.boolean().default(false).optional(),
-      refresh: z.boolean().default(false).optional()
-    },
-    async ({ courseQuery, daysAhead, includeRaw, refresh }) =>
-      learn.dueDatesSummary({
-        courseQuery: courseQuery as string | undefined,
-        daysAhead: (daysAhead as number | undefined) ?? 14,
-        includeRaw: Boolean(includeRaw),
-        refresh: Boolean(refresh)
-      }),
-    { outputSchema: DueDatesSchema }
-  );
+  const upcomingInput = {
+    courseQuery: z.string().min(1).optional(),
+    daysAhead: z.number().int().min(1).max(180).default(14).optional()
+  };
 
-  registerReadOnlyTool(
-    "learn_due_dates",
-    "Return upcoming readable due dates across active courses or one resolved course. Important: read the top-level items array; checkedCourses is only metadata. Default window is the next 14 days.",
-    {
-      courseQuery: z.string().min(1).optional(),
-      daysAhead: z.number().int().min(1).max(180).default(14).optional(),
-      includeRaw: z.boolean().default(false).optional(),
-      refresh: z.boolean().default(false).optional()
-    },
-    async ({ courseQuery, daysAhead, includeRaw, refresh }) =>
-      learn.dueDatesSummary({
-        courseQuery: courseQuery as string | undefined,
-        daysAhead: (daysAhead as number | undefined) ?? 14,
-        includeRaw: Boolean(includeRaw),
-        refresh: Boolean(refresh)
-      }),
-    { outputSchema: DueDatesSchema }
-  );
+  const upcomingHandler = async (input: Record<string, unknown>) => {
+    const daysAhead = (input.daysAhead as number | undefined) ?? 14;
+    const result = await service.upcoming({
+      courseQuery: input.courseQuery as string | undefined,
+      daysAhead
+    });
+    return { ...result, daysAhead, itemCount: result.items.length };
+  };
+
+  const upcomingDescription =
+    "Every assignment and quiz due in the next N days, across all courses at once. Omit courseQuery to cover all courses. Read the items array; courses and errors are metadata. This is the tool to answer 'what is due this week'.";
+
+  registerReadOnlyTool("learn_due_dates", upcomingDescription, upcomingInput, upcomingHandler, {
+    requiresAuth: false,
+    outputSchema: UpcomingResultSchema
+  });
+
+  registerReadOnlyTool("learn_due_items", upcomingDescription, upcomingInput, upcomingHandler, {
+    requiresAuth: false,
+    outputSchema: UpcomingResultSchema
+  });
+
+  const announcementsInput = {
+    courseQuery: z.string().min(1).optional(),
+    limit: z.number().int().min(1).max(50).default(10).optional()
+  };
+
+  const announcementsHandler = async (input: Record<string, unknown>) => {
+    const result = await service.announcements({
+      courseQuery: input.courseQuery as string | undefined,
+      limit: (input.limit as number | undefined) ?? 10
+    });
+    return { ...result, itemCount: result.items.length };
+  };
+
+  const announcementsDescription =
+    "Recent announcements, newest first, with their full text. Omit courseQuery to cover all courses. This is the tool to answer 'what is the latest announcement'.";
+
+  registerReadOnlyTool("learn_announcements", announcementsDescription, announcementsInput, announcementsHandler, {
+    requiresAuth: false,
+    outputSchema: AnnouncementsFeedSchema
+  });
 
   registerReadOnlyTool(
     "learn_latest_announcements",
-    "Return the latest visible announcements for one resolved course query.",
-    {
-      courseQuery: z.string().min(1),
-      limit: z.number().int().min(1).max(20).default(5).optional(),
-      includeRaw: z.boolean().default(false).optional(),
-      refresh: z.boolean().default(false).optional()
-    },
-    async ({ courseQuery, limit, includeRaw, refresh }) =>
-      learn.latestAnnouncements({
-        courseQuery: courseQuery as string,
-        limit: (limit as number | undefined) ?? 5,
-        includeRaw: Boolean(includeRaw),
-        refresh: Boolean(refresh)
-      }),
-    { outputSchema: AnnouncementsResultSchema }
-  );
-
-  registerReadOnlyTool(
-    "learn_announcements",
-    "Return recent visible announcements for one resolved course query.",
-    {
-      courseQuery: z.string().min(1),
-      limit: z.number().int().min(1).max(20).default(5).optional(),
-      includeRaw: z.boolean().default(false).optional(),
-      refresh: z.boolean().default(false).optional()
-    },
-    async ({ courseQuery, limit, includeRaw, refresh }) =>
-      learn.latestAnnouncements({
-        courseQuery: courseQuery as string,
-        limit: (limit as number | undefined) ?? 5,
-        includeRaw: Boolean(includeRaw),
-        refresh: Boolean(refresh)
-      }),
-    { outputSchema: AnnouncementsResultSchema }
+    announcementsDescription,
+    announcementsInput,
+    announcementsHandler,
+    { requiresAuth: false, outputSchema: AnnouncementsFeedSchema }
   );
 
   registerReadOnlyTool(
@@ -373,13 +398,15 @@ export function createLearnMcpServer(browser = new BrowserSession()): LearnMcpSe
 
   registerReadOnlyTool(
     "learn_grades",
-    "Fetch and parse the visible student grades page for a course id.",
+    "Released grades, with each item's name, displayed grade, points and weight. Omit courseQuery to cover all courses. Items with no released grade are absent. This is the tool to answer 'how am I doing'.",
     {
-      courseId: z.string().regex(/^\d+$/),
-      refresh: z.boolean().default(false).optional()
+      courseQuery: z.string().min(1).optional()
     },
-    async ({ courseId, refresh }) => learn.listGrades(courseId as string, Boolean(refresh)),
-    { outputSchema: ParsedPageSchema }
+    async ({ courseQuery }) => {
+      const result = await service.grades(courseQuery as string | undefined);
+      return { ...result, itemCount: result.items.length };
+    },
+    { requiresAuth: false, outputSchema: GradesResultSchema }
   );
 
   registerReadOnlyTool(

@@ -217,6 +217,17 @@ export class BrowserSession {
     };
   }
 
+  /**
+   * Cookies from the open browser context, or null when none is running.
+   *
+   * Never launches a browser: callers use this to prefer a live session over
+   * the snapshot on disk, and a read must not pay for a browser start-up.
+   */
+  async liveCookies(): Promise<Array<{ name: string; value: string; domain: string }> | null> {
+    if (!this.context) return null;
+    return this.context.cookies().catch(() => null);
+  }
+
   async close(): Promise<void> {
     await this.context?.close();
     this.context = undefined;

@@ -183,6 +183,97 @@ export const DashboardSchema = z.object({
 
 export const GenericObjectSchema = z.record(z.string(), z.unknown());
 
+/* Valence-API backed schemas. A course spans several org units (lecture, lab,
+   sections), so these expose the merged course and never ask the caller to
+   choose an org unit. */
+
+export const CourseComponentSchema = z.object({
+  orgUnitId: z.string(),
+  name: z.string(),
+  code: z.string().nullable()
+});
+
+export const MergedCourseSchema = z.object({
+  key: z.string(),
+  label: z.string(),
+  term: z.string().nullable(),
+  orgUnitIds: z.array(z.string()),
+  components: z.array(CourseComponentSchema)
+});
+
+export const OrgUnitErrorSchema = z.object({
+  orgUnitId: z.string(),
+  courseLabel: z.string(),
+  source: z.string(),
+  error: z.string(),
+  message: z.string()
+});
+
+export const MergedCoursesResultSchema = z.object({
+  count: z.number(),
+  courses: z.array(MergedCourseSchema)
+});
+
+export const UpcomingItemSchema = z.object({
+  type: z.enum(["assignment", "quiz"]),
+  id: z.string(),
+  title: z.string(),
+  dueAt: z.string(),
+  courseKey: z.string(),
+  courseLabel: z.string(),
+  orgUnitId: z.string()
+});
+
+export const UpcomingResultSchema = z.object({
+  status: z.enum(["ok", "not_found"]),
+  query: z.string().optional(),
+  daysAhead: z.number(),
+  itemCount: z.number(),
+  items: z.array(UpcomingItemSchema),
+  courses: z.array(MergedCourseSchema),
+  errors: z.array(OrgUnitErrorSchema)
+});
+
+const ScoreSchema = z.object({ earned: z.number(), possible: z.number() }).nullable();
+
+export const GradeItemSchema = z.object({
+  name: z.string(),
+  displayedGrade: z.string().nullable(),
+  points: ScoreSchema,
+  weight: ScoreSchema,
+  courseKey: z.string(),
+  courseLabel: z.string(),
+  orgUnitId: z.string()
+});
+
+export const GradesResultSchema = z.object({
+  status: z.enum(["ok", "not_found"]),
+  query: z.string().optional(),
+  itemCount: z.number(),
+  items: z.array(GradeItemSchema),
+  courses: z.array(MergedCourseSchema),
+  errors: z.array(OrgUnitErrorSchema)
+});
+
+export const AnnouncementItemSchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  body: z.string(),
+  postedAt: z.string().nullable(),
+  courseKey: z.string(),
+  courseLabel: z.string(),
+  orgUnitId: z.string()
+});
+
+export const AnnouncementsFeedSchema = z.object({
+  status: z.enum(["ok", "not_found"]),
+  query: z.string().optional(),
+  itemCount: z.number(),
+  items: z.array(AnnouncementItemSchema),
+  courses: z.array(MergedCourseSchema),
+  errors: z.array(OrgUnitErrorSchema)
+});
+
 export function schemaToJson(schema: z.ZodTypeAny): unknown {
   return z.toJSONSchema(schema);
 }
