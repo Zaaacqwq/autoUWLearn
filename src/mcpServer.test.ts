@@ -55,7 +55,28 @@ function fakeApi(overrides: { failAll?: Error } = {}) {
           ? [{ Id: 1, Title: "Prelab 4 office hour", Body: { Text: "Room E5" }, StartDate: day(-1) }]
           : []
       ),
-    contentToc: async () => guard({ Modules: [] })
+    contentToc: async (ou: string | number) =>
+      guard(
+        String(ou) === "2005" || String(ou) === "2001"
+          ? {
+              Modules: [
+                {
+                  ModuleId: 1,
+                  Title: "Lectures",
+                  Topics: [
+                    {
+                      TopicId: 6534618,
+                      Title: "01-introduction",
+                      TypeIdentifier: "File",
+                      Url: "/content/enforced/2001-ECE318/01-introduction.pdf"
+                    }
+                  ]
+                }
+              ]
+            }
+          : { Modules: [] }
+      ),
+    fetchFile: async () => ({ bytes: new Uint8Array([1]), contentType: "application/pdf", url: "x" })
   } as never;
 }
 
@@ -191,4 +212,29 @@ test("an expired session is reported as an auth error with the login URL", async
     },
     { failAll: new LearnAuthError("/d2l/api/le/1.95/1/grades/") }
   );
+});
+
+test("learn_content lists a course's files with their module path", async () => {
+  await withClient(async (client) => {
+    const result = await client.callTool({ name: "learn_content", arguments: { courseQuery: "ECE 318" } });
+    assert.equal(result.isError, undefined);
+
+    const content = result.structuredContent as any;
+    assert.equal(content.itemCount, 1);
+    assert.equal(content.items[0].title, "01-introduction");
+    assert.deepEqual(content.items[0].modulePath, ["Lectures"]);
+    assert.equal(content.items[0].isFile, true);
+    assert.equal(content.items[0].extension, "pdf");
+    assert.equal(content.items[0].courseLabel, "ECE 318");
+  });
+});
+
+test("learn_read_content reports not_found for a topic that does not exist", async () => {
+  await withClient(async (client) => {
+    const result = await client.callTool({
+      name: "learn_read_content",
+      arguments: { topicQuery: "nonexistent lecture", courseQuery: "ECE 318" }
+    });
+    assert.equal((result.structuredContent as any).status, "not_found");
+  });
 });

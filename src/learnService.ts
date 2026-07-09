@@ -1,4 +1,6 @@
+import { flattenToc, type ContentTopic, type RawModule } from "./contentTree.js";
 import { findCourses, mergeOrgUnits, type Course, type OrgUnit } from "./courseIdentity.js";
+import { extractDocumentText } from "./extractText.js";
 import type { LearnApi } from "./learnApi.js";
 
 export type ResolutionStatus = "ok" | "not_found";
@@ -54,11 +56,34 @@ export interface LearnServiceOptions {
   readonly now?: () => number;
 }
 
+export interface CourseTopic extends ContentTopic {
+  readonly courseKey: string;
+  readonly courseLabel: string;
+  readonly orgUnitId: string;
+}
+
+export interface ReadTopicResult {
+  readonly status: "ok" | "not_found" | "ambiguous";
+  readonly query?: string;
+  readonly topic?: CourseTopic;
+  readonly candidates?: readonly CourseTopic[];
+  readonly text?: string;
+  readonly pages?: number | null;
+  readonly bytes?: number;
+  readonly truncated?: boolean;
+}
+
 export interface LearnService {
   courses(): Promise<Course[]>;
   upcoming(options?: { daysAhead?: number; courseQuery?: string }): Promise<Result<DueItem>>;
   grades(courseQuery?: string): Promise<Result<GradeItem>>;
   announcements(options?: { courseQuery?: string; limit?: number }): Promise<Result<Announcement>>;
+  content(courseQuery?: string): Promise<Result<CourseTopic>>;
+  readTopic(options: {
+    topicQuery: string;
+    courseQuery?: string;
+    maxChars?: number;
+  }): Promise<ReadTopicResult>;
 }
 
 interface RawCourse {
@@ -288,5 +313,62 @@ export function createLearnService(options: LearnServiceOptions): LearnService {
     return { status: "ok", query: input.courseQuery, courses: matched, items: ordered, errors };
   }
 
-  return { courses, upcoming, grades, announcements };
+  async function content(courseQuery?: string): Promise<Result<CourseTopic>> {
+    const { status, matched } = await resolve(courseQuery);
+    if (status === "not_found") return { status, query: courseQuery, courses: [], items: [], errors: [] };
+
+    const { items, errors } = await fanOut(matched, "content", async (orgUnitId, course) => {
+      const toc = await api.contentToc<{ Modules?: RawModule[] }>(orgUnitId);
+      return flattenToc(toc.Modules).map((topic) => ({
+        ...topic,
+        courseKey: course.key,
+        courseLabel: course.label,
+        orgUnitId
+      }));
+    });
+
+    return { status: "ok", query: courseQuery, courses: matched, items, errors };
+  }
+
+  async function readTopic(input: {
+    topicQuery: string;
+    courseQuery?: string;
+    maxChars?: number;
+  }): Promise<ReadTopicResult> {
+    const maxChars = input.maxChars ?? 40_000;
+    const listing = await content(input.courseQuery);
+    if (listing.status === "not_found") {
+      return { status: "not_found", query: input.topicQuery };
+    }
+
+    const needle = input.topicQuery.trim().toLowerCase();
+    const readable = listing.items.filter((topic) => topic.isFile);
+
+    const exact = readable.filter((topic) => topic.topicId === input.topicQuery.trim());
+    const matches = exact.length > 0
+      ? exact
+      : readable.filter((topic) => topic.title.toLowerCase().includes(needle));
+
+    if (matches.length === 0) return { status: "not_found", query: input.topicQuery };
+    if (matches.length > 1) {
+      return { status: "ambiguous", query: input.topicQuery, candidates: matches.slice(0, 20) };
+    }
+
+    const topic = matches[0];
+    const file = await api.fetchFile(topic.url as string);
+    const extracted = await extractDocumentText(file.bytes, file.contentType, topic.url as string);
+    const truncated = extracted.text.length > maxChars;
+
+    return {
+      status: "ok",
+      query: input.topicQuery,
+      topic,
+      text: truncated ? extracted.text.slice(0, maxChars) : extracted.text,
+      pages: extracted.pages,
+      bytes: file.bytes.byteLength,
+      truncated
+    };
+  }
+
+  return { courses, upcoming, grades, announcements, content, readTopic };
 }

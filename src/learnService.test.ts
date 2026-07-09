@@ -20,6 +20,8 @@ interface FakeData {
   quizzes?: Record<string, { Objects: unknown[] }>;
   grades?: Record<string, unknown[]>;
   news?: Record<string, unknown[]>;
+  toc?: Record<string, { Modules: unknown[] }>;
+  files?: Record<string, { bytes: Uint8Array; contentType: string }>;
   fail?: Record<string, Error>;
 }
 
@@ -38,9 +40,26 @@ function fakeApi(data: FakeData) {
     quizzes: (ou: string | number) => pick(data.quizzes, ou, { Objects: [] }),
     grades: (ou: string | number) => pick(data.grades, ou, [] as unknown[]),
     announcements: (ou: string | number) => pick(data.news, ou, [] as unknown[]),
-    contentToc: async () => ({ Modules: [] })
+    contentToc: (ou: string | number) => pick(data.toc, ou, { Modules: [] as unknown[] }),
+    fetchFile: async (path: string) => {
+      const file = data.files?.[path];
+      if (!file) throw new Error(`no stub file for ${path}`);
+      return { bytes: file.bytes, contentType: file.contentType, url: `https://learn.uwaterloo.ca${path}` };
+    }
   } as never;
 }
+
+const LECTURE_URL = "/content/enforced/100-ECE318/lecture-01.pdf";
+const LAB_URL = "/content/enforced/101-ECE318/lab-01.pdf";
+
+const tocWith = (topics: unknown[]) => ({ Modules: [{ ModuleId: 1, Title: "Lectures", Topics: topics }] });
+
+const topic = (id: number, title: string, url: string) => ({
+  TopicId: id,
+  Title: title,
+  TypeIdentifier: "File",
+  Url: url
+});
 
 const service = (data: FakeData) => createLearnService({ api: fakeApi(data), now: () => NOW });
 
@@ -186,4 +205,84 @@ test("announcements are newest first, hidden ones dropped, and limited", async (
 
   const { items } = await svc.announcements({ limit: 2 });
   assert.deepEqual(items.map((i) => i.title), ["New", "Old"]);
+});
+
+const HELLO_PDF = new Uint8Array(
+  Buffer.from(
+    "JVBERi0xLjQKMSAwIG9iago8PC9UeXBlL0NhdGFsb2cvUGFnZXMgMiAwIFI+PgplbmRvYmoKMiAwIG9iago8PC9UeXBlL1BhZ2VzL0tpZHNbMyAwIFJdL0NvdW50IDE+PgplbmRvYmoKMyAwIG9iago8PC9UeXBlL1BhZ2UvUGFyZW50IDIgMCBSL01lZGlhQm94WzAgMCAyMDAgMjAwXS9SZXNvdXJjZXM8PC9Gb250PDwvRjEgNCAwIFI+Pj4+L0NvbnRlbnRzIDUgMCBSPj4KZW5kb2JqCjQgMCBvYmoKPDwvVHlwZS9Gb250L1N1YnR5cGUvVHlwZTEvQmFzZUZvbnQvSGVsdmV0aWNhPj4KZW5kb2JqCjUgMCBvYmoKPDwvTGVuZ3RoIDQ0Pj4Kc3RyZWFtCkJUCi9GMSAyNCBUZgoyMCAxMDAgVGQKKEhlbGxvIFBERikgVGoKRVQKZW5kc3RyZWFtCmVuZG9iagp4cmVmCjAgNgowMDAwMDAwMDAwIDY1NTM1IGYgCjAwMDAwMDAwMDkgMDAwMDAgbiAKMDAwMDAwMDA1NiAwMDAwMCBuIAowMDAwMDAwMTExIDAwMDAwIG4gCjAwMDAwMDAyMzUgMDAwMDAgbiAKMDAwMDAwMDMwNCAwMDAwMCBuIAp0cmFpbGVyCjw8L1NpemUgNi9Sb290IDEgMCBSPj4Kc3RhcnR4cmVmCjM5OAolJUVPRgo=",
+    "base64"
+  )
+);
+
+test("content lists topics from every component of a course", async () => {
+  const svc = service({
+    toc: {
+      "100": tocWith([topic(1, "Lecture 01", LECTURE_URL)]),
+      "101": tocWith([topic(2, "Lab 01", LAB_URL)])
+    }
+  });
+
+  const { items } = await svc.content("ECE 318");
+  assert.deepEqual(items.map((t) => t.title).sort(), ["Lab 01", "Lecture 01"]);
+  assert.ok(items.every((t) => t.courseLabel === "ECE 318"));
+});
+
+test("readTopic extracts the text of a matched lecture", async () => {
+  const svc = service({
+    toc: { "100": tocWith([topic(1, "Lecture 01 Introduction", LECTURE_URL)]) },
+    files: { [LECTURE_URL]: { bytes: HELLO_PDF, contentType: "application/pdf" } }
+  });
+
+  const result = await svc.readTopic({ topicQuery: "introduction", courseQuery: "ECE 318" });
+  assert.equal(result.status, "ok");
+  assert.match(result.text ?? "", /Hello PDF/);
+  assert.equal(result.pages, 1);
+  assert.equal(result.topic?.title, "Lecture 01 Introduction");
+});
+
+test("readTopic matches on topic id exactly", async () => {
+  const svc = service({
+    toc: { "100": tocWith([topic(1, "Lecture 01", LECTURE_URL), topic(2, "Lecture 02", LAB_URL)]) },
+    files: { [LAB_URL]: { bytes: HELLO_PDF, contentType: "application/pdf" } }
+  });
+
+  const result = await svc.readTopic({ topicQuery: "2", courseQuery: "ECE 318" });
+  assert.equal(result.status, "ok");
+  assert.equal(result.topic?.title, "Lecture 02");
+});
+
+test("readTopic reports candidates instead of guessing between them", async () => {
+  const svc = service({
+    toc: { "100": tocWith([topic(1, "Lecture 01", LECTURE_URL), topic(2, "Lecture 02", LAB_URL)]) }
+  });
+
+  const result = await svc.readTopic({ topicQuery: "lecture", courseQuery: "ECE 318" });
+  assert.equal(result.status, "ambiguous");
+  assert.equal(result.candidates?.length, 2);
+  assert.equal(result.text, undefined);
+});
+
+test("readTopic ignores topics that are external links, not course files", async () => {
+  const svc = service({
+    toc: {
+      "100": {
+        Modules: [
+          { ModuleId: 1, Title: "Lectures", Topics: [{ TopicId: 5, Title: "Slides", TypeIdentifier: "Link", Url: "https://example.com/slides" }] }
+        ]
+      }
+    }
+  });
+
+  assert.equal((await svc.readTopic({ topicQuery: "slides", courseQuery: "ECE 318" })).status, "not_found");
+});
+
+test("readTopic truncates very long documents and says so", async () => {
+  const svc = service({
+    toc: { "100": tocWith([topic(1, "Lecture 01", LECTURE_URL)]) },
+    files: { [LECTURE_URL]: { bytes: HELLO_PDF, contentType: "application/pdf" } }
+  });
+
+  const result = await svc.readTopic({ topicQuery: "lecture 01", courseQuery: "ECE 318", maxChars: 5 });
+  assert.equal(result.truncated, true);
+  assert.equal(result.text?.length, 5);
 });

@@ -274,6 +274,39 @@ export const AnnouncementsFeedSchema = z.object({
   errors: z.array(OrgUnitErrorSchema)
 });
 
+export const ContentTopicSummarySchema = z.object({
+  topicId: z.string(),
+  title: z.string(),
+  modulePath: z.array(z.string()),
+  type: z.string(),
+  url: z.string().nullable(),
+  isFile: z.boolean(),
+  extension: z.string().nullable(),
+  courseKey: z.string(),
+  courseLabel: z.string(),
+  orgUnitId: z.string()
+});
+
+export const ContentListingSchema = z.object({
+  status: z.enum(["ok", "not_found"]),
+  query: z.string().optional(),
+  itemCount: z.number(),
+  items: z.array(ContentTopicSummarySchema),
+  courses: z.array(MergedCourseSchema),
+  errors: z.array(OrgUnitErrorSchema)
+});
+
+export const ReadTopicSchema = z.object({
+  status: z.enum(["ok", "not_found", "ambiguous"]),
+  query: z.string().optional(),
+  topic: ContentTopicSummarySchema.optional(),
+  candidates: z.array(ContentTopicSummarySchema).optional(),
+  text: z.string().optional(),
+  pages: z.number().nullable().optional(),
+  bytes: z.number().optional(),
+  truncated: z.boolean().optional()
+});
+
 export function schemaToJson(schema: z.ZodTypeAny): unknown {
   return z.toJSONSchema(schema);
 }

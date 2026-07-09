@@ -12,16 +12,10 @@ import { recordToolDoc, zodRawShapeToJson } from "./toolRegistry.js";
 import {
   AnnouncementsFeedSchema,
   AuthStatusSchema,
-  ContentItemResultSchema,
-  ContentResultSchema,
-  CourseHomeSchema,
-  CourseResolutionSchema,
-  CoursesResultSchema,
-  DashboardSchema,
-  DownloadResultSchema,
+  ContentListingSchema,
   GradesResultSchema,
   MergedCoursesResultSchema,
-  ParsedPageSchema,
+  ReadTopicSchema,
   UpcomingResultSchema,
   schemaToJson
 } from "./toolSchemas.js";
@@ -146,69 +140,46 @@ export function createLearnMcpServer(
     );
   }
 
+  /* Auth. The browser exists only to establish a LEARN session; no read uses it. */
+
   registerReadOnlyTool(
     "learn_auth_status",
-    "Check whether the Playwright browser profile is currently authenticated to Waterloo LEARN.",
+    "Check whether the LEARN session is currently valid.",
     {},
     async () => learn.authStatus(true),
     { requiresAuth: false, outputSchema: AuthStatusSchema }
   );
 
   registerReadOnlyTool(
-    "learn_login",
-    "Start manual Waterloo LEARN login in the persistent Playwright browser session. No UW password is stored or sent to ChatGPT.",
-    {},
-    async () => learn.authStart(),
-    { requiresAuth: false, outputSchema: AuthStatusSchema }
-  );
-
-  registerReadOnlyTool(
     "learn_auth_start",
-    "Start manual Waterloo LEARN login and return the local auth page URL/status.",
+    "Open Waterloo LEARN in the local browser so the user can complete SSO and MFA by hand, and return the local auth page URL. No Waterloo password is stored or sent to the model.",
     {},
     async () => learn.authStart(),
-    { requiresAuth: false, outputSchema: AuthStatusSchema }
-  );
-
-  registerReadOnlyTool(
-    "learn_auth_reset",
-    "Reset the saved Playwright session profile. Use only when login state is broken; requires logging in again.",
-    {},
-    async () => learn.authReset(),
     { requiresAuth: false, outputSchema: AuthStatusSchema }
   );
 
   registerReadOnlyTool(
     "learn_auth_save",
-    "Save the current authenticated UW LEARN Playwright storage state so it can be restored after the browser closes.",
+    "Persist the authenticated LEARN session so it survives the browser closing.",
     {},
     async () => learn.authSave(),
     { requiresAuth: false, outputSchema: AuthStatusSchema }
   );
 
   registerReadOnlyTool(
-    "learn_auth_save_and_close",
-    "Save the current authenticated UW LEARN storage state and close the visible Playwright browser. Future reads restore cookies headlessly.",
+    "learn_auth_reset",
+    "Discard the saved LEARN session. Use only when login state is broken; the user must log in again afterwards.",
     {},
-    async () => learn.authSaveAndClose(),
+    async () => learn.authReset(),
     { requiresAuth: false, outputSchema: AuthStatusSchema }
   );
 
-  registerReadOnlyTool(
-    "learn_list_courses",
-    "List courses visible on the LEARN homepage using the Brightspace mycourses endpoint.",
-    {
-      pageSize: z.number().int().min(1).max(500).default(100).optional(),
-      includeRaw: z.boolean().default(false).optional(),
-      refresh: z.boolean().default(false).optional()
-    },
-    async ({ pageSize, includeRaw, refresh }) => learn.listCourses((pageSize as number | undefined) ?? 100, Boolean(refresh), Boolean(includeRaw)),
-    { outputSchema: CoursesResultSchema }
-  );
+  /* Reads, served from the Valence JSON API. Each takes an optional courseQuery
+     such as "ECE 318"; omitting it covers every course. */
 
   registerReadOnlyTool(
     "learn_courses",
-    "List the user's current UW LEARN courses. Each course merges its org units (lecture, lab, sections) under one label such as 'ECE 318'. Pass a course's label or key to the other tools; never pass an orgUnitId.",
+    "List the user's current LEARN courses. Each course merges its org units (lecture, lab, sections) under one label such as 'ECE 318'. Pass that label to the other tools; never pass an orgUnitId.",
     {},
     async () => {
       const courses = await service.courses();
@@ -218,190 +189,27 @@ export function createLearnMcpServer(
   );
 
   registerReadOnlyTool(
-    "learn_find_course",
-    "Find visible LEARN courses by course id, course code, or natural query such as ECE 350. Returns all matches instead of guessing when ambiguous.",
+    "learn_due_dates",
+    "Every assignment and quiz due in the next N days, across all courses at once. Omit courseQuery to cover all courses. Read the items array; courses and errors are metadata. Use this to answer 'what is due this week'.",
     {
-      query: z.string().min(1),
-      includeRaw: z.boolean().default(false).optional(),
-      refresh: z.boolean().default(false).optional()
+      courseQuery: z.string().min(1).optional(),
+      daysAhead: z.number().int().min(1).max(180).default(14).optional()
     },
-    async ({ query, includeRaw, refresh }) => learn.findCourse(query as string, Boolean(includeRaw), Boolean(refresh)),
-    { outputSchema: CourseResolutionSchema }
-  );
-
-  const upcomingInput = {
-    courseQuery: z.string().min(1).optional(),
-    daysAhead: z.number().int().min(1).max(180).default(14).optional()
-  };
-
-  const upcomingHandler = async (input: Record<string, unknown>) => {
-    const daysAhead = (input.daysAhead as number | undefined) ?? 14;
-    const result = await service.upcoming({
-      courseQuery: input.courseQuery as string | undefined,
-      daysAhead
-    });
-    return { ...result, daysAhead, itemCount: result.items.length };
-  };
-
-  const upcomingDescription =
-    "Every assignment and quiz due in the next N days, across all courses at once. Omit courseQuery to cover all courses. Read the items array; courses and errors are metadata. This is the tool to answer 'what is due this week'.";
-
-  registerReadOnlyTool("learn_due_dates", upcomingDescription, upcomingInput, upcomingHandler, {
-    requiresAuth: false,
-    outputSchema: UpcomingResultSchema
-  });
-
-  registerReadOnlyTool("learn_due_items", upcomingDescription, upcomingInput, upcomingHandler, {
-    requiresAuth: false,
-    outputSchema: UpcomingResultSchema
-  });
-
-  const announcementsInput = {
-    courseQuery: z.string().min(1).optional(),
-    limit: z.number().int().min(1).max(50).default(10).optional()
-  };
-
-  const announcementsHandler = async (input: Record<string, unknown>) => {
-    const result = await service.announcements({
-      courseQuery: input.courseQuery as string | undefined,
-      limit: (input.limit as number | undefined) ?? 10
-    });
-    return { ...result, itemCount: result.items.length };
-  };
-
-  const announcementsDescription =
-    "Recent announcements, newest first, with their full text. Omit courseQuery to cover all courses. This is the tool to answer 'what is the latest announcement'.";
-
-  registerReadOnlyTool("learn_announcements", announcementsDescription, announcementsInput, announcementsHandler, {
-    requiresAuth: false,
-    outputSchema: AnnouncementsFeedSchema
-  });
-
-  registerReadOnlyTool(
-    "learn_latest_announcements",
-    announcementsDescription,
-    announcementsInput,
-    announcementsHandler,
-    { requiresAuth: false, outputSchema: AnnouncementsFeedSchema }
-  );
-
-  registerReadOnlyTool(
-    "learn_course_dashboard",
-    "Return a concise dashboard for one resolved course: latest announcements, upcoming due items, and useful navigation links.",
-    {
-      courseQuery: z.string().min(1),
-      daysAhead: z.number().int().min(1).max(180).default(14).optional(),
-      announcementLimit: z.number().int().min(1).max(20).default(3).optional(),
-      refresh: z.boolean().default(false).optional()
+    async (input) => {
+      const daysAhead = (input.daysAhead as number | undefined) ?? 14;
+      const result = await service.upcoming({
+        courseQuery: input.courseQuery as string | undefined,
+        daysAhead
+      });
+      return { ...result, daysAhead, itemCount: result.items.length };
     },
-    async ({ courseQuery, daysAhead, announcementLimit, refresh }) =>
-      learn.courseDashboard({
-        courseQuery: courseQuery as string,
-        daysAhead: (daysAhead as number | undefined) ?? 14,
-        announcementLimit: (announcementLimit as number | undefined) ?? 3,
-        refresh: Boolean(refresh)
-      }),
-    { outputSchema: DashboardSchema }
-  );
-
-  registerReadOnlyTool(
-    "learn_all_courses_dashboard",
-    "Return a concise dashboard across all active visible courses.",
-    {
-      daysAhead: z.number().int().min(1).max(180).default(14).optional(),
-      announcementLimit: z.number().int().min(1).max(20).default(1).optional(),
-      refresh: z.boolean().default(false).optional()
-    },
-    async ({ daysAhead, announcementLimit, refresh }) =>
-      learn.allCoursesDashboard({
-        daysAhead: (daysAhead as number | undefined) ?? 14,
-        announcementLimit: (announcementLimit as number | undefined) ?? 1,
-        refresh: Boolean(refresh)
-      }),
-    { outputSchema: DashboardSchema }
-  );
-
-  registerReadOnlyTool(
-    "learn_get_course_home",
-    "Fetch and parse a course home page, including useful course navigation links and visible update text.",
-    {
-      courseId: z.string().regex(/^\d+$/)
-    },
-    async ({ courseId }) => learn.getCourseHome(courseId as string),
-    { outputSchema: CourseHomeSchema }
-  );
-
-  registerReadOnlyTool(
-    "learn_list_content",
-    "Fetch and parse the D2L Content page for a course.",
-    {
-      courseId: z.string().regex(/^\d+$/),
-      refresh: z.boolean().default(false).optional()
-    },
-    async ({ courseId, refresh }) => learn.listContent(courseId as string, Boolean(refresh)),
-    { outputSchema: ContentResultSchema }
-  );
-
-  registerReadOnlyTool(
-    "learn_content",
-    "Fetch and parse course content modules/topics for a course id.",
-    {
-      courseId: z.string().regex(/^\d+$/),
-      refresh: z.boolean().default(false).optional()
-    },
-    async ({ courseId, refresh }) => learn.listContent(courseId as string, Boolean(refresh)),
-    { outputSchema: ContentResultSchema }
-  );
-
-  registerReadOnlyTool(
-    "learn_get_content_item",
-    "Fetch and parse a specific D2L content item page, including embedded/downloadable file URLs.",
-    {
-      courseId: z.string().regex(/^\d+$/),
-      contentId: z.string().regex(/^\d+$/)
-    },
-    async ({ courseId, contentId }) => learn.getContentItem(courseId as string, contentId as string),
-    { outputSchema: ContentItemResultSchema }
-  );
-
-  registerReadOnlyTool(
-    "learn_download_content_file",
-    "Download an authenticated LEARN enforced content file URL into the local LEARN download directory.",
-    {
-      url: z.string().url(),
-      filename: z.string().min(1).max(180).optional()
-    },
-    async ({ url, filename }) => learn.downloadContentFile(url as string, filename as string | undefined),
-    { outputSchema: DownloadResultSchema }
-  );
-
-  registerReadOnlyTool(
-    "learn_list_announcements",
-    "Fetch visible announcement/news text and links from a course home page.",
-    {
-      courseId: z.string().regex(/^\d+$/)
-    },
-    async ({ courseId }) => learn.listAnnouncements(courseId as string),
-    { outputSchema: ParsedPageSchema }
-  );
-
-  registerReadOnlyTool(
-    "learn_list_grades",
-    "Fetch and parse the read-only student grades page for a course.",
-    {
-      courseId: z.string().regex(/^\d+$/),
-      refresh: z.boolean().default(false).optional()
-    },
-    async ({ courseId, refresh }) => learn.listGrades(courseId as string, Boolean(refresh)),
-    { outputSchema: ParsedPageSchema }
+    { requiresAuth: false, outputSchema: UpcomingResultSchema }
   );
 
   registerReadOnlyTool(
     "learn_grades",
-    "Released grades, with each item's name, displayed grade, points and weight. Omit courseQuery to cover all courses. Items with no released grade are absent. This is the tool to answer 'how am I doing'.",
-    {
-      courseQuery: z.string().min(1).optional()
-    },
+    "Released grades, with each item's name, displayed grade, points and weight. Omit courseQuery to cover all courses. Items whose grade has not been released are absent. Use this to answer 'how am I doing'.",
+    { courseQuery: z.string().min(1).optional() },
     async ({ courseQuery }) => {
       const result = await service.grades(courseQuery as string | undefined);
       return { ...result, itemCount: result.items.length };
@@ -410,53 +218,48 @@ export function createLearnMcpServer(
   );
 
   registerReadOnlyTool(
-    "learn_list_calendar",
-    "Fetch and parse the course calendar page.",
+    "learn_announcements",
+    "Recent announcements, newest first, with their full text. Omit courseQuery to cover all courses. Use this to answer 'what is the latest announcement'.",
     {
-      courseId: z.string().regex(/^\d+$/)
+      courseQuery: z.string().min(1).optional(),
+      limit: z.number().int().min(1).max(50).default(10).optional()
     },
-    async ({ courseId }) => learn.listCalendar(courseId as string),
-    { outputSchema: ParsedPageSchema }
+    async (input) => {
+      const result = await service.announcements({
+        courseQuery: input.courseQuery as string | undefined,
+        limit: (input.limit as number | undefined) ?? 10
+      });
+      return { ...result, itemCount: result.items.length };
+    },
+    { requiresAuth: false, outputSchema: AnnouncementsFeedSchema }
   );
 
   registerReadOnlyTool(
-    "learn_list_assignments",
-    "Fetch and parse the course Dropbox/assignments page.",
-    {
-      courseId: z.string().regex(/^\d+$/)
+    "learn_content",
+    "List a course's content: every lecture slide, lab handout and link, with the module it sits under. Returns titles and topicIds, not file contents. Use learn_read_content to read one.",
+    { courseQuery: z.string().min(1).optional() },
+    async ({ courseQuery }) => {
+      const result = await service.content(courseQuery as string | undefined);
+      return { ...result, itemCount: result.items.length };
     },
-    async ({ courseId }) => learn.listAssignments(courseId as string),
-    { outputSchema: ParsedPageSchema }
+    { requiresAuth: false, outputSchema: ContentListingSchema }
   );
 
   registerReadOnlyTool(
-    "learn_list_quizzes",
-    "Fetch and parse the course quizzes page.",
+    "learn_read_content",
+    "Read the text of one course file, such as a lecture PDF. topicQuery matches a topicId exactly, or a substring of the title. Returns candidates instead of guessing when several match. Use this to answer questions about what a lecture says.",
     {
-      courseId: z.string().regex(/^\d+$/)
+      topicQuery: z.string().min(1),
+      courseQuery: z.string().min(1).optional(),
+      maxChars: z.number().int().min(1000).max(200_000).default(40_000).optional()
     },
-    async ({ courseId }) => learn.listQuizzes(courseId as string),
-    { outputSchema: ParsedPageSchema }
-  );
-
-  registerReadOnlyTool(
-    "learn_list_discussions",
-    "Fetch and parse the course discussions list page.",
-    {
-      courseId: z.string().regex(/^\d+$/)
-    },
-    async ({ courseId }) => learn.listDiscussions(courseId as string),
-    { outputSchema: ParsedPageSchema }
-  );
-
-  registerReadOnlyTool(
-    "learn_fetch_page",
-    "Fetch and parse an arbitrary read-only page on learn.uwaterloo.ca. Only GET requests to the LEARN host are allowed.",
-    {
-      pathOrUrl: z.string().min(1)
-    },
-    async ({ pathOrUrl }) => learn.fetchPage(pathOrUrl as string),
-    { outputSchema: ParsedPageSchema }
+    async (input) =>
+      service.readTopic({
+        topicQuery: input.topicQuery as string,
+        courseQuery: input.courseQuery as string | undefined,
+        maxChars: input.maxChars as number | undefined
+      }),
+    { requiresAuth: false, outputSchema: ReadTopicSchema }
   );
 
   return { server, browser };

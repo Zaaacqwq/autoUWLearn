@@ -1,3 +1,5 @@
+import { ENFORCED_CONTENT_PREFIX } from "./contentTree.js";
+
 const DEFAULT_BASE_URL = "https://learn.uwaterloo.ca";
 const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_MAX_RETRIES = 3;
@@ -53,10 +55,17 @@ export interface ApiVersions {
   readonly lp: string;
 }
 
+export interface FetchedFile {
+  readonly bytes: Uint8Array;
+  readonly contentType: string;
+  readonly url: string;
+}
+
 export interface LearnApi {
   warmUp(): Promise<ApiVersions>;
   versions(): Promise<ApiVersions>;
   getJson<T = unknown>(path: string): Promise<T>;
+  fetchFile(path: string): Promise<FetchedFile>;
   courses<T = unknown>(): Promise<T>;
   grades<T = unknown>(orgUnitId: number | string): Promise<T>;
   assignments<T = unknown>(orgUnitId: number | string): Promise<T>;
@@ -157,6 +166,29 @@ export function createLearnApi(options: LearnApiOptions): LearnApi {
     return versionsPromise;
   }
 
+  /**
+   * Downloads a course file. Restricted to LEARN's enforced content path so a
+   * caller cannot turn this into a general fetcher pointed at any URL.
+   */
+  async function fetchFile(path: string): Promise<FetchedFile> {
+    if (!path.startsWith(ENFORCED_CONTENT_PREFIX)) {
+      throw new Error(`Refusing to download a path outside ${ENFORCED_CONTENT_PREFIX}: ${path}`);
+    }
+
+    const url = new URL(path, baseUrl).toString();
+    const requestHeaders = { Cookie: await options.cookieHeader(), Accept: "*/*" };
+    const response = await limited(() => fetchImpl(url, { redirect: "follow", headers: requestHeaders }));
+
+    if (response.status === 403) throw await classifyForbidden(path);
+    if (!response.ok) throw new LearnHttpError(response.status, path);
+
+    return {
+      bytes: new Uint8Array(await response.arrayBuffer()),
+      contentType: response.headers.get("content-type") ?? "application/octet-stream",
+      url
+    };
+  }
+
   const le = async (orgUnitId: number | string, suffix: string): Promise<string> =>
     `/d2l/api/le/${(await versions()).le}/${orgUnitId}/${suffix}`;
 
@@ -164,6 +196,7 @@ export function createLearnApi(options: LearnApiOptions): LearnApi {
     versions,
     warmUp: versions,
     getJson,
+    fetchFile,
 
     courses: <T>() =>
       getJson<T>(
