@@ -279,3 +279,59 @@ test("a genuine LEARN page is not mistaken for the login page", async () => {
   );
   assert.match(body, /Quizzes/);
 });
+
+/* An expired session must produce an error, not a hang. */
+
+/** Fails the test rather than hanging the suite when a promise never settles. */
+const settlesWithin = <T>(work: Promise<T>, ms: number): Promise<T> =>
+  Promise.race([
+    work,
+    new Promise<never>((_resolve, reject) =>
+      setTimeout(() => reject(new Error(`did not settle within ${ms}ms`)), ms).unref()
+    )
+  ]);
+
+test("a 403 on the versions endpoint is an auth error, not a deadlock", async () => {
+  // LEARN answers 403 for every path once the session dies, versions included.
+  // Classifying that 403 used to consult versions() — the very call in flight —
+  // so it awaited itself, and every tool that touched the API hung until its
+  // deadline instead of reporting that the login had expired.
+  const stub = stubFetch([[/.*/, () => html(403)]]);
+
+  await assert.rejects(
+    () => settlesWithin(createLearnApi({ cookieHeader: () => "stale", fetchImpl: stub.impl }).whoami(), 1000),
+    LearnAuthError
+  );
+});
+
+test("a 403 on a course path still distinguishes permission from expiry", async () => {
+  // The oracle is intact for the case it was written for: whoami succeeding
+  // means the session is fine and this org unit simply is not visible.
+  const stub = stubFetch([
+    [/versions/, () => json(versionsPayload)],
+    [/whoami/, () => json({ Identifier: "1" })],
+    [/grades/, () => html(403)]
+  ]);
+
+  await assert.rejects(
+    () => settlesWithin(createLearnApi({ cookieHeader: () => "live", fetchImpl: stub.impl }).grades(2002), 1000),
+    LearnPermissionError
+  );
+});
+
+test("a failed versions lookup is not remembered past the re-login that fixes it", async () => {
+  let sessionAlive = false;
+  const stub = stubFetch([
+    [/versions/, () => (sessionAlive ? json(versionsPayload) : html(403))],
+    [/whoami/, () => (sessionAlive ? json({ Identifier: "1" }) : html(403))]
+  ]);
+  const api = createLearnApi({ cookieHeader: () => "stale", fetchImpl: stub.impl });
+
+  await assert.rejects(() => settlesWithin(api.whoami(), 1000), LearnAuthError);
+
+  // Recovery logs back in; the same client must now work rather than replay the
+  // rejection it cached on the way down.
+  sessionAlive = true;
+  const me = await settlesWithin(api.whoami(), 1000);
+  assert.equal((me as { Identifier: string }).Identifier, "1");
+});

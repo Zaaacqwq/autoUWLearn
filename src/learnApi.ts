@@ -1,6 +1,8 @@
 import { ENFORCED_CONTENT_PREFIX } from "./contentTree.js";
 
 const DEFAULT_BASE_URL = "https://learn.uwaterloo.ca";
+/** Every other path's version number is read from here, so it is fetched first. */
+const VERSIONS_PATH = "/d2l/api/versions/";
 const DEFAULT_CONCURRENCY = 4;
 const DEFAULT_MAX_RETRIES = 3;
 
@@ -205,7 +207,20 @@ export function createLearnApi(options: LearnApiOptions): LearnApi {
    * succeeds for any live session.
    */
   const classifyForbidden = async (path: string): Promise<Error> => {
-    const { lp } = await versions();
+    // The versions endpoint belongs to no org unit, so a 403 there can only be
+    // the session. Asking versions() to prove that would await the very promise
+    // this call is running inside: a deadlock, which is how an expired session
+    // turned every tool into a timeout rather than an AUTH_REQUIRED.
+    if (path === VERSIONS_PATH) return new LearnAuthError(path);
+
+    let lp: string;
+    try {
+      ({ lp } = await versions());
+    } catch {
+      // Versions is unreachable or unauthorised; there is no oracle to consult.
+      return new LearnAuthError(path);
+    }
+
     try {
       const probe = await send(`/d2l/api/lp/${lp}/users/whoami`);
       return probe.ok ? new LearnPermissionError(path) : new LearnAuthError(path);
@@ -240,11 +255,17 @@ export function createLearnApi(options: LearnApiOptions): LearnApi {
   }
 
   async function versions(): Promise<ApiVersions> {
+    // A failed lookup is never cached: versions fails when the session is dead,
+    // and a remembered rejection would outlive the re-login that fixed it,
+    // leaving every later call to fail with a stale error.
     versionsPromise ??= (async () => {
-      const products = await getJson<Array<{ ProductCode: string; LatestVersion: string }>>("/d2l/api/versions/");
+      const products = await getJson<Array<{ ProductCode: string; LatestVersion: string }>>(VERSIONS_PATH);
       const latest = new Map(products.map((product) => [product.ProductCode, product.LatestVersion]));
       return { le: latest.get("le") ?? "1.0", lp: latest.get("lp") ?? "1.0" };
-    })();
+    })().catch((error: unknown) => {
+      versionsPromise = undefined;
+      throw error;
+    });
     return versionsPromise;
   }
 
