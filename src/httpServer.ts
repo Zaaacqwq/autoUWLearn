@@ -11,7 +11,7 @@ import { config } from "./config.js";
 import { createLearnApi } from "./learnApi.js";
 import { createLearnMcpServer } from "./mcpServer.js";
 import { createSessionKeeper } from "./sessionKeeper.js";
-import { createCookieHeaderProvider } from "./sessionCookies.js";
+import { createSessionCookieStore } from "./sessionCookies.js";
 import { getToolDocs, openApiSpec } from "./toolRegistry.js";
 import {
   authorizationServerMetadata,
@@ -53,13 +53,17 @@ void createLearnMcpServer(sharedBrowser);
 const sessionKeeper = createSessionKeeper({
   intervalMs: Number(process.env.LEARN_HEARTBEAT_MS ?? 5 * 60 * 1000),
   probe: async () => {
+    // Absorbing the response cookies is the point of the beat, not a detail of
+    // it: an extended session we cannot present again has not been kept alive.
+    const cookies = createSessionCookieStore({
+      liveCookies: () => sharedBrowser.liveCookies(),
+      storageStatePath: config.storageStatePath,
+      host: new URL(config.learnBaseUrl).hostname
+    });
     await createLearnApi({
       baseUrl: config.learnBaseUrl,
-      cookieHeader: createCookieHeaderProvider({
-        liveCookies: () => sharedBrowser.liveCookies(),
-        storageStatePath: config.storageStatePath,
-        host: new URL(config.learnBaseUrl).hostname
-      })
+      cookieHeader: cookies.header,
+      onSetCookie: cookies.absorb
     }).whoami();
   },
   recover: () => sharedBrowser.refreshSession(),

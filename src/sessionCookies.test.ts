@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { MissingSessionCookiesError, type SessionCookie } from "./cookieSource.js";
-import { createCookieHeaderProvider } from "./sessionCookies.js";
+import { createCookieHeaderProvider, createSessionCookieStore } from "./sessionCookies.js";
 
 const HOST = "learn.uwaterloo.ca";
 
@@ -72,4 +72,76 @@ test("surfaces MissingSessionCookiesError when neither source has a session", as
   });
 
   await assert.rejects(() => provider(), MissingSessionCookiesError);
+});
+
+/* Absorbing rotated cookies: the write-back half that keeps the header usable. */
+
+function readJar(file: string): SessionCookie[] {
+  return (JSON.parse(fs.readFileSync(file, "utf8")) as { cookies: SessionCookie[] }).cookies;
+}
+
+function store(file: string) {
+  return createSessionCookieStore({ liveCookies: async () => null, storageStatePath: file, host: HOST });
+}
+
+test("a rotated session cookie is written over the stale one on disk", async () => {
+  const file = stateFile(cookies("stale"));
+  const jar = store(file);
+
+  const written = jar.absorb(["d2lSessionVal=rotated; path=/; HttpOnly"]);
+
+  assert.deepEqual(written, ["d2lSessionVal"]);
+  assert.match(await jar.header(), /d2lSessionVal=rotated/);
+  assert.match(await jar.header(), /d2lSecureSessionVal=stale/);
+});
+
+test("the rotation survives into the next process, not just this one", () => {
+  const file = stateFile(cookies("stale"));
+  store(file).absorb(["d2lSessionVal=rotated; path=/"]);
+
+  const value = readJar(file).find((cookie) => cookie.name === "d2lSessionVal")?.value;
+  assert.equal(value, "rotated");
+});
+
+test("everything else in the storage state is preserved", () => {
+  const file = path.join(os.tmpdir(), `autouwlearn-origins-${process.pid}-${Math.random()}.json`);
+  fs.writeFileSync(file, JSON.stringify({ cookies: cookies("stale"), origins: [{ origin: "https://x" }] }));
+
+  store(file).absorb(["d2lSessionVal=rotated; path=/"]);
+
+  const state = JSON.parse(fs.readFileSync(file, "utf8")) as { origins: unknown[]; cookies: SessionCookie[] };
+  assert.deepEqual(state.origins, [{ origin: "https://x" }]);
+  assert.equal(state.cookies.length, 2);
+});
+
+test("a response that rotated nothing does not rewrite the file", () => {
+  const file = stateFile(cookies("same"));
+  const before = fs.statSync(file).mtimeMs;
+
+  assert.deepEqual(store(file).absorb(["d2lSessionVal=same; path=/"]), []);
+  assert.equal(fs.statSync(file).mtimeMs, before);
+});
+
+test("cookies LEARN sets that are not the session are ignored", () => {
+  const file = stateFile(cookies("stale"));
+
+  assert.deepEqual(store(file).absorb(["d2l_analytics=1; path=/", "ASP.NET_SessionId=zz"]), []);
+  assert.equal(readJar(file).length, 2);
+});
+
+test("a logout is never absorbed over a live session", async () => {
+  // LEARN clears the cookie on its own sign-out page. Persisting that would log
+  // the server out for good, and only a human could undo it.
+  const file = stateFile(cookies("live"));
+  const jar = store(file);
+
+  assert.deepEqual(jar.absorb(["d2lSessionVal=; Expires=Thu, 01 Jan 1970 00:00:00 GMT"]), []);
+  assert.match(await jar.header(), /d2lSessionVal=live/);
+});
+
+test("with no snapshot on disk there is nothing to update", () => {
+  const file = path.join(os.tmpdir(), `autouwlearn-absent-${process.pid}-${Math.random()}.json`);
+
+  assert.deepEqual(store(file).absorb(["d2lSessionVal=rotated"]), []);
+  assert.equal(fs.existsSync(file), false);
 });

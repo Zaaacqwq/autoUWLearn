@@ -6,7 +6,8 @@ import { config } from "./config.js";
 import { MissingSessionCookiesError } from "./cookieSource.js";
 import { createLearnApi, LearnAuthError } from "./learnApi.js";
 import { createLearnService, type LearnService } from "./learnService.js";
-import { createCookieHeaderProvider } from "./sessionCookies.js";
+import { createSessionCookieStore } from "./sessionCookies.js";
+import { createSessionRecovery, type SessionRecovery } from "./sessionRecovery.js";
 import { recordToolDoc, zodRawShapeToJson } from "./toolRegistry.js";
 import {
   AnnouncementsFeedSchema,
@@ -27,6 +28,8 @@ export interface LearnMcpServerHandle {
 export interface LearnMcpServerDeps {
   /** Injected by tests; otherwise built from the browser session's cookies. */
   service?: LearnService;
+  /** Injected by tests; otherwise a silent re-login through the browser profile. */
+  recovery?: SessionRecovery;
 }
 
 export function createLearnMcpServer(
@@ -35,18 +38,25 @@ export function createLearnMcpServer(
 ): LearnMcpServerHandle {
   // Reads go straight to the Valence JSON API over the session cookies. The
   // browser is only needed to establish that session, never to serve a read.
+  const cookies = createSessionCookieStore({
+    liveCookies: () => browser.liveCookies(),
+    storageStatePath: config.storageStatePath,
+    host: new URL(config.learnBaseUrl).hostname
+  });
+
   const service =
     deps.service ??
     createLearnService({
       api: createLearnApi({
         baseUrl: config.learnBaseUrl,
-        cookieHeader: createCookieHeaderProvider({
-          liveCookies: () => browser.liveCookies(),
-          storageStatePath: config.storageStatePath,
-          host: new URL(config.learnBaseUrl).hostname
-        })
+        cookieHeader: cookies.header,
+        onSetCookie: cookies.absorb
       })
     });
+
+  // A lapsed session is repaired under the failing read rather than reported,
+  // whenever the browser profile can still complete SSO without a human.
+  const recovery = deps.recovery ?? createSessionRecovery({ recover: () => browser.refreshSession() });
 
   const server = new McpServer({
     name: "autouwlearn",
@@ -77,7 +87,7 @@ export function createLearnMcpServer(
     description: string,
     inputSchema: z.ZodRawShape,
     handler: (input: Record<string, unknown>) => Promise<unknown> | unknown,
-    options: { requiresAuth?: boolean; outputSchema?: z.ZodTypeAny } = { requiresAuth: true }
+    options: { recoversSession?: boolean; outputSchema?: z.ZodTypeAny } = {}
   ) {
     recordToolDoc({
       name,
@@ -101,7 +111,12 @@ export function createLearnMcpServer(
       },
       async (input: Record<string, unknown>) => {
         try {
-          return jsonResult(await withToolTimeout(handler(input), name), { structured: Boolean(options.outputSchema) });
+          // Reads retry through a silent re-login; the auth tools are what a
+          // failed re-login falls back to, so they must report state as it is.
+          const run = options.recoversSession === false
+            ? () => Promise.resolve(handler(input))
+            : () => recovery.run(async () => handler(input));
+          return jsonResult(await withToolTimeout(run(), name), { structured: Boolean(options.outputSchema) });
         } catch (error) {
           // A lapsed SSO session surfaces as a 403 from the API or as absent
           // cookies on disk. Either way the fix is the same: log in again.
@@ -140,7 +155,7 @@ export function createLearnMcpServer(
     "Check whether the LEARN session is currently valid.",
     {},
     async () => browser.authStatus({ force: true }),
-    { requiresAuth: false, outputSchema: AuthStatusSchema }
+    { recoversSession: false, outputSchema: AuthStatusSchema }
   );
 
   registerReadOnlyTool(
@@ -148,7 +163,7 @@ export function createLearnMcpServer(
     "Open Waterloo LEARN in the local browser so the user can complete SSO and MFA by hand, and return the local auth page URL. No Waterloo password is stored or sent to the model.",
     {},
     async () => browser.startManualLogin(),
-    { requiresAuth: false, outputSchema: AuthStatusSchema }
+    { recoversSession: false, outputSchema: AuthStatusSchema }
   );
 
   registerReadOnlyTool(
@@ -156,7 +171,7 @@ export function createLearnMcpServer(
     "Persist the authenticated LEARN session so it survives the browser closing.",
     {},
     async () => browser.saveSessionState(),
-    { requiresAuth: false, outputSchema: AuthStatusSchema }
+    { recoversSession: false, outputSchema: AuthStatusSchema }
   );
 
   registerReadOnlyTool(
@@ -164,7 +179,7 @@ export function createLearnMcpServer(
     "Discard the saved LEARN session. Use only when login state is broken; the user must log in again afterwards.",
     {},
     async () => browser.resetSession(),
-    { requiresAuth: false, outputSchema: AuthStatusSchema }
+    { recoversSession: false, outputSchema: AuthStatusSchema }
   );
 
   /* Reads, served from the Valence JSON API. Each takes an optional courseQuery
@@ -178,7 +193,7 @@ export function createLearnMcpServer(
       const courses = await service.courses();
       return { count: courses.length, courses };
     },
-    { requiresAuth: false, outputSchema: MergedCoursesResultSchema }
+    { outputSchema: MergedCoursesResultSchema }
   );
 
   registerReadOnlyTool(
@@ -196,7 +211,7 @@ export function createLearnMcpServer(
       });
       return { ...result, daysAhead, itemCount: result.items.length };
     },
-    { requiresAuth: false, outputSchema: UpcomingResultSchema }
+    { outputSchema: UpcomingResultSchema }
   );
 
   registerReadOnlyTool(
@@ -207,7 +222,7 @@ export function createLearnMcpServer(
       const result = await service.grades(courseQuery as string | undefined);
       return { ...result, itemCount: result.items.length };
     },
-    { requiresAuth: false, outputSchema: GradesResultSchema }
+    { outputSchema: GradesResultSchema }
   );
 
   registerReadOnlyTool(
@@ -224,7 +239,7 @@ export function createLearnMcpServer(
       });
       return { ...result, itemCount: result.items.length };
     },
-    { requiresAuth: false, outputSchema: AnnouncementsFeedSchema }
+    { outputSchema: AnnouncementsFeedSchema }
   );
 
   registerReadOnlyTool(
@@ -235,7 +250,7 @@ export function createLearnMcpServer(
       const result = await service.content(courseQuery as string | undefined);
       return { ...result, itemCount: result.items.length };
     },
-    { requiresAuth: false, outputSchema: ContentListingSchema }
+    { outputSchema: ContentListingSchema }
   );
 
   registerReadOnlyTool(
@@ -252,7 +267,7 @@ export function createLearnMcpServer(
         courseQuery: input.courseQuery as string | undefined,
         maxChars: input.maxChars as number | undefined
       }),
-    { requiresAuth: false, outputSchema: ReadTopicSchema }
+    { outputSchema: ReadTopicSchema }
   );
 
   return { server, browser };

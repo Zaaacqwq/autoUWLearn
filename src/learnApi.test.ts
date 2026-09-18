@@ -140,3 +140,142 @@ test("bounds concurrency so the school's servers are not hammered", async () => 
 
   assert.ok(stub.peak() <= 3, `peak in-flight was ${stub.peak()}, expected <= 3`);
 });
+
+/* Session rotation and the shapes a lapsed session actually arrives in. */
+
+test("every Set-Cookie LEARN returns is handed to the jar", async () => {
+  const stub = stubFetch([
+    [/versions/, () => json(versionsPayload)],
+    [
+      /whoami/,
+      () =>
+        new Response(JSON.stringify({ Identifier: "1" }), {
+          status: 200,
+          headers: [
+            ["content-type", "application/json"],
+            ["set-cookie", "d2lSessionVal=rotated; path=/; HttpOnly"],
+            ["set-cookie", "d2lSecureSessionVal=rotated2; path=/; Secure"]
+          ]
+        })
+    ]
+  ]);
+
+  const absorbed: string[][] = [];
+  await createLearnApi({
+    cookieHeader: () => "d2lSessionVal=old; d2lSecureSessionVal=old",
+    fetchImpl: stub.impl,
+    onSetCookie: (headers) => absorbed.push([...headers])
+  }).whoami();
+
+  assert.deepEqual(absorbed.at(-1), [
+    "d2lSessionVal=rotated; path=/; HttpOnly",
+    "d2lSecureSessionVal=rotated2; path=/; Secure"
+  ]);
+});
+
+test("a response that rotates nothing does not disturb the jar", async () => {
+  const stub = stubFetch([
+    [/versions/, () => json(versionsPayload)],
+    [/whoami/, () => json({ Identifier: "1" })]
+  ]);
+
+  let calls = 0;
+  await createLearnApi({
+    cookieHeader: () => "d2lSessionVal=old",
+    fetchImpl: stub.impl,
+    onSetCookie: () => {
+      calls += 1;
+    }
+  }).whoami();
+
+  assert.equal(calls, 0);
+});
+
+test("a JSON read bounced to SSO is a lapsed session, not an opaque 302", async () => {
+  // LEARN redirects an unauthenticated API request to the identity provider.
+  // Reported as "LEARN answered 302" it is actionable by nobody.
+  const stub = stubFetch([
+    [/versions/, () => json(versionsPayload)],
+    [
+      /whoami/,
+      () =>
+        new Response(null, {
+          status: 302,
+          headers: { location: "https://login.microsoftonline.com/saml2" }
+        })
+    ]
+  ]);
+
+  await assert.rejects(
+    () => createLearnApi({ cookieHeader: () => "stale", fetchImpl: stub.impl }).whoami(),
+    LearnAuthError
+  );
+});
+
+test("an HTML read that lands on the login page is a lapsed session too", async () => {
+  // fetchHtml follows redirects, so expiry arrives as a 200 whose body is the
+  // Waterloo login page rather than the list page that was asked for.
+  const stub = stubFetch([
+    [/versions/, () => json(versionsPayload)],
+    [
+      /quizzes_list/,
+      () =>
+        Object.defineProperty(new Response("<html>Sign in</html>", { status: 200 }), "url", {
+          value: "https://login.microsoftonline.com/common/oauth2/authorize"
+        })
+    ]
+  ]);
+
+  await assert.rejects(
+    () => createLearnApi({ cookieHeader: () => "stale", fetchImpl: stub.impl }).fetchHtml("/d2l/lms/quizzing/quizzes_list"),
+    LearnAuthError
+  );
+});
+
+test("a 304 is not mistaken for a redirect to SSO", async () => {
+  const stub = stubFetch([
+    [/versions/, () => json(versionsPayload)],
+    [/whoami/, () => new Response(null, { status: 304 })]
+  ]);
+
+  await assert.rejects(
+    () => createLearnApi({ cookieHeader: () => "live", fetchImpl: stub.impl }).whoami(),
+    LearnHttpError
+  );
+});
+
+test("a LEARN path that merely contains 'login' is still a LEARN page", async () => {
+  const stub = stubFetch([
+    [/versions/, () => json(versionsPayload)],
+    [
+      /enforced/,
+      () =>
+        Object.defineProperty(new Response("pdf", { status: 200 }), "url", {
+          value: "https://learn.uwaterloo.ca/content/enforced/1/week3-login-security.pdf"
+        })
+    ]
+  ]);
+
+  const file = await createLearnApi({ cookieHeader: () => "live", fetchImpl: stub.impl }).fetchFile(
+    "/content/enforced/1/week3-login-security.pdf"
+  );
+  assert.equal(file.bytes.byteLength, 3);
+});
+
+test("a genuine LEARN page is not mistaken for the login page", async () => {
+  const stub = stubFetch([
+    [/versions/, () => json(versionsPayload)],
+    [
+      /quizzes_list/,
+      () =>
+        Object.defineProperty(new Response("<html>Quizzes</html>", { status: 200 }), "url", {
+          value: "https://learn.uwaterloo.ca/d2l/lms/quizzing/user/quizzes_list.d2l?ou=1"
+        })
+    ]
+  ]);
+
+  const body = await createLearnApi({ cookieHeader: () => "live", fetchImpl: stub.impl }).fetchHtml(
+    "/d2l/lms/quizzing/quizzes_list"
+  );
+  assert.match(body, /Quizzes/);
+});

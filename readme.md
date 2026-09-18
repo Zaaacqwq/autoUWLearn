@@ -35,7 +35,8 @@ Optional:
 ```bash
 LEARN_BASE_URL=https://learn.uwaterloo.ca
 LEARN_STATE_HOME=~/.uwlearn-mcp          # profile, storage state, tokens, downloads
-LEARN_HEADLESS=true
+LEARN_HEADLESS=true                      # interactive login only; recovery is always headless
+LEARN_HEARTBEAT_MS=300000                # how often to keep the LEARN session warm
 LEARN_MCP_AUTHORIZE_ATTEMPTS=10          # per window
 LEARN_MCP_AUTHORIZE_WINDOW_MS=900000
 ```
@@ -54,7 +55,17 @@ It opens LEARN in a local browser and waits while you complete Waterloo SSO/MFA 
 ssh -L 8787:127.0.0.1:8787 <host>
 ```
 
-The login window appears on the server's own display, so drive it there or over screen sharing. Press **Save session** afterwards to persist the cookies; reads then work with the browser closed. When the session lapses, tools return `AUTH_REQUIRED` with this URL.
+The login window appears on the server's own display, so drive it there or over screen sharing. Press **Save session** afterwards to persist the cookies; reads then work with the browser closed.
+
+## Staying logged in
+
+Typing a password should be rare. Three mechanisms keep it that way, and they matter in this order:
+
+- **Rotation is written back.** LEARN reissues the session cookie as you use it. Reads go out over `fetch`, which has no cookie jar, so every `Set-Cookie` LEARN returns is folded into the saved session explicitly. Without this the server keeps presenting the value from the last interactive login until LEARN stops accepting it — a session that dies while the heartbeat reports it healthy.
+- **A heartbeat.** Brightspace signs out a session that goes quiet and offers no keep-alive endpoint, so any authenticated request has to serve as one. `LEARN_HEARTBEAT_MS` (default 5 minutes) sets the interval.
+- **Silent re-login, on the failing read.** When a read does find the session gone, it replays the SSO handshake headlessly and retries once, before anything is reported. Waterloo's upstream identity session outlives the Brightspace one and Duo remembers the device, so this usually succeeds with nobody watching. Concurrent reads share one attempt, and a failed attempt is not retried for five minutes.
+
+Only when that re-login needs a password do tools return `AUTH_REQUIRED` with the auth URL. `/health` reports the session state, so a lapse is visible without asking a tool.
 
 ## Running
 

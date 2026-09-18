@@ -147,3 +147,31 @@ per-user filter state.
 Deadlines come from JSON. Only submission status requires HTML, and there it is
 stated in plain words (`Not Submitted`, `0 / 1`) rather than inferred, which is
 what made the old HTML due-date parsing fragile.
+
+## The session
+
+Two cookies authenticate every read, `d2lSessionVal` and `d2lSecureSessionVal`,
+and LEARN rejects either one without the other.
+
+Three things about them decide how long the server stays logged in:
+
+1. **They rotate.** LEARN reissues them mid-session over `Set-Cookie`. A browser
+   absorbs that silently; `fetch` does not, having no cookie jar. Reads that
+   discard the rotation keep replaying the value from the last interactive
+   login, which LEARN eventually stops accepting — so the write-back in
+   `sessionCookies.ts` is not an optimisation, it is what makes the saved
+   session survive its own use.
+2. **The timeout is idle, not absolute.** Brightspace signs out a quiet session
+   ("Your session was open without any activity for a while") and offers no
+   dedicated keep-alive endpoint; any authenticated request counts, which is
+   what the `whoami` heartbeat is for.
+3. **Expiry does not always look like 403.** A JSON read answers `302` to the
+   identity provider, and a file or HTML read — which follows redirects —
+   answers `200` with the Waterloo login page as its body. Both are session
+   expiry and both must be classified as such, or they surface as an
+   unactionable HTTP error and no recovery is attempted.
+
+Recovery is a headless navigation to `/d2l/home` in the persistent browser
+profile. It works because Waterloo's upstream identity session outlives the
+Brightspace one and Duo remembers the device for weeks; it fails, and needs a
+human, only once that upstream session has gone too.

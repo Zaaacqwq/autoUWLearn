@@ -6,6 +6,7 @@ import { BrowserSession } from "./browserSession.js";
 import { LearnAuthError } from "./learnApi.js";
 import { createLearnService } from "./learnService.js";
 import { createLearnMcpServer } from "./mcpServer.js";
+import { createSessionRecovery } from "./sessionRecovery.js";
 import type { AuthStatus } from "./authTypes.js";
 
 const NOW = Date.parse("2026-07-09T00:00:00.000Z");
@@ -20,9 +21,11 @@ const coursesPayload = {
   ]
 };
 
-function fakeApi(overrides: { failAll?: Error } = {}) {
+function fakeApi(overrides: { readonly failAll?: Error } = {}) {
   const guard = async <T>(value: T): Promise<T> => {
-    if (overrides.failAll) throw overrides.failAll;
+    // Read once: a caller may supply a failure that fires only on the first look.
+    const failure = overrides.failAll;
+    if (failure) throw failure;
     return value;
   };
   return {
@@ -127,10 +130,24 @@ class FakeBrowser extends BrowserSession {
 
 async function withClient(
   run: (client: Client) => Promise<void>,
-  options: { failAll?: Error } = {}
+  options: { failAll?: Error; failOnce?: Error; recover?: () => Promise<boolean> } = {}
 ) {
-  const service = createLearnService({ api: fakeApi(options), now: () => NOW });
-  const { server } = createLearnMcpServer(new FakeBrowser(), { service });
+  // failOnce reproduces the real shape of a lapse: the first read fails, and a
+  // silent re-login is all that stands between the user and an answer.
+  let pending = options.failOnce;
+  const api = fakeApi({
+    get failAll() {
+      if (options.failAll) return options.failAll;
+      const once = pending;
+      pending = undefined;
+      return once;
+    }
+  });
+  const service = createLearnService({ api, now: () => NOW });
+  const { server } = createLearnMcpServer(new FakeBrowser(), {
+    service,
+    ...(options.recover ? { recovery: createSessionRecovery({ recover: options.recover }) } : {})
+  });
   const client = new Client({ name: "autouwlearn-test", version: "1.0.0" });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
@@ -252,6 +269,56 @@ test("an expired session is reported as an auth error with the login URL", async
     },
     { failAll: new LearnAuthError("/d2l/api/le/1.95/1/grades/") }
   );
+});
+
+test("a session that lapses mid-read is repaired silently, not handed to the user", async () => {
+  let recoveries = 0;
+  await withClient(
+    async (client) => {
+      const result = await client.callTool({ name: "learn_due_dates", arguments: {} });
+
+      assert.equal(result.isError, undefined, "the user should never learn this happened");
+      assert.equal((result.structuredContent as any).itemCount > 0, true);
+    },
+    {
+      failOnce: new LearnAuthError("/d2l/api/le/1.95/1/grades/"),
+      recover: async () => {
+        recoveries += 1;
+        return true;
+      }
+    }
+  );
+  assert.equal(recoveries, 1);
+});
+
+test("only when a re-login cannot help is the user sent to the login page", async () => {
+  await withClient(
+    async (client) => {
+      const result = await client.callTool({ name: "learn_due_dates", arguments: {} });
+      assert.equal(result.isError, true);
+      assert.equal(JSON.parse((result.content as any)[0].text).error, "AUTH_REQUIRED");
+    },
+    { failAll: new LearnAuthError("/d2l/api/le/1.95/1/grades/"), recover: async () => false }
+  );
+});
+
+test("learn_auth_status reports the session as it is, without repairing it first", async () => {
+  // It is the fallback a failed recovery points at; a self-healing answer here
+  // would tell the user they are logged in while every read still fails.
+  let recoveries = 0;
+  await withClient(
+    async (client) => {
+      const result = await client.callTool({ name: "learn_auth_status", arguments: {} });
+      assert.equal(result.isError, undefined);
+    },
+    {
+      recover: async () => {
+        recoveries += 1;
+        return true;
+      }
+    }
+  );
+  assert.equal(recoveries, 0);
 });
 
 test("learn_content lists a course's files with their module path", async () => {

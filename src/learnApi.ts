@@ -44,6 +44,12 @@ export class LearnNetworkError extends Error {
 export interface LearnApiOptions {
   readonly baseUrl?: string;
   readonly cookieHeader: () => string | Promise<string>;
+  /**
+   * Handed every `Set-Cookie` LEARN returns. `fetch` has no cookie jar, so
+   * without this the session rotation Brightspace performs mid-session is
+   * silently dropped and the credential we hold goes stale.
+   */
+  readonly onSetCookie?: (headers: readonly string[]) => void;
   readonly fetchImpl?: typeof fetch;
   readonly concurrency?: number;
   readonly maxRetries?: number;
@@ -133,6 +139,23 @@ function createSemaphore(limit: number) {
 
 const isTransient = (status: number): boolean => status === 429 || status >= 500;
 
+/**
+ * Whether a followed redirect walked off LEARN entirely.
+ *
+ * A file or HTML read follows redirects, so a lapsed session arrives as a
+ * perfectly ordinary 200 whose body is the Waterloo login page. Matching on the
+ * host rather than on login-ish words in the path is what keeps a course file
+ * that happens to be named "login" from being mistaken for one.
+ */
+const leftTheLearnHost = (response: Response, baseUrl: string): boolean => {
+  try {
+    return new URL(response.url).host !== new URL(baseUrl).host;
+  } catch {
+    // A response with no url to speak of; let the status decide instead.
+    return false;
+  }
+};
+
 const sleep = (ms: number): Promise<void> =>
   ms <= 0 ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -152,11 +175,29 @@ export function createLearnApi(options: LearnApiOptions): LearnApi {
     Accept: "application/json"
   });
 
+  /** Feeds a response's rotated cookies back to the caller's jar. */
+  const absorb = (response: Response): Response => {
+    if (!options.onSetCookie) return response;
+    const setCookie = response.headers.getSetCookie?.() ?? [];
+    if (setCookie.length > 0) options.onSetCookie(setCookie);
+    return response;
+  };
+
   const send = async (path: string): Promise<Response> => {
     const url = new URL(path, baseUrl).toString();
     const requestHeaders = await headers();
-    return limited(() => fetchImpl(url, { redirect: "manual", headers: requestHeaders }));
+    return absorb(await limited(() => fetchImpl(url, { redirect: "manual", headers: requestHeaders })));
   };
+
+  /**
+   * A redirect on a JSON read is a lapsed session, not a resource that moved:
+   * LEARN bounces an unauthenticated API request to the SSO entry point. Left
+   * unclassified it surfaces as an opaque "LEARN answered 302", which neither
+   * the recovery path nor the user can act on. 304 is excluded: it is a 3xx
+   * that redirects nowhere.
+   */
+  const isSsoRedirect = (response: Response): boolean =>
+    response.status >= 300 && response.status < 400 && response.status !== 304 && response.headers.has("location");
 
   /**
    * A 403 means either a dead session or an org unit the user cannot see, and
@@ -188,6 +229,7 @@ export function createLearnApi(options: LearnApiOptions): LearnApi {
 
       if (response.ok) return (await response.json()) as T;
       if (response.status === 403) throw await classifyForbidden(path);
+      if (isSsoRedirect(response)) throw new LearnAuthError(path);
 
       lastStatus = response.status;
       if (!isTransient(lastStatus) || attempt === maxRetries) throw new LearnHttpError(lastStatus, path);
@@ -217,9 +259,10 @@ export function createLearnApi(options: LearnApiOptions): LearnApi {
 
     const url = new URL(path, baseUrl).toString();
     const requestHeaders = { Cookie: await options.cookieHeader(), Accept: "*/*" };
-    const response = await limited(() => fetchImpl(url, { redirect: "follow", headers: requestHeaders }));
+    const response = absorb(await limited(() => fetchImpl(url, { redirect: "follow", headers: requestHeaders })));
 
     if (response.status === 403) throw await classifyForbidden(path);
+    if (leftTheLearnHost(response, baseUrl)) throw new LearnAuthError(path);
     if (!response.ok) throw new LearnHttpError(response.status, path);
 
     return {
@@ -248,9 +291,10 @@ export function createLearnApi(options: LearnApiOptions): LearnApi {
   async function fetchHtml(path: string): Promise<string> {
     const url = new URL(path, baseUrl).toString();
     const requestHeaders = { Cookie: await options.cookieHeader(), Accept: "text/html" };
-    const response = await limited(() => fetchImpl(url, { redirect: "follow", headers: requestHeaders }));
+    const response = absorb(await limited(() => fetchImpl(url, { redirect: "follow", headers: requestHeaders })));
 
     if (response.status === 403) throw await classifyForbidden(path);
+    if (leftTheLearnHost(response, baseUrl)) throw new LearnAuthError(path);
     if (!response.ok) throw new LearnHttpError(response.status, path);
     return response.text();
   }
