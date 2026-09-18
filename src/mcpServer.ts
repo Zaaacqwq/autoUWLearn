@@ -5,7 +5,6 @@ import { BrowserSession } from "./browserSession.js";
 import { config } from "./config.js";
 import { MissingSessionCookiesError } from "./cookieSource.js";
 import { createLearnApi, LearnAuthError } from "./learnApi.js";
-import { LearnClient } from "./learnClient.js";
 import { createLearnService, type LearnService } from "./learnService.js";
 import { createCookieHeaderProvider } from "./sessionCookies.js";
 import { recordToolDoc, zodRawShapeToJson } from "./toolRegistry.js";
@@ -34,8 +33,6 @@ export function createLearnMcpServer(
   browser = new BrowserSession(),
   deps: LearnMcpServerDeps = {}
 ): LearnMcpServerHandle {
-  const learn = new LearnClient(browser);
-
   // Reads go straight to the Valence JSON API over the session cookies. The
   // browser is only needed to establish that session, never to serve a read.
   const service =
@@ -104,10 +101,6 @@ export function createLearnMcpServer(
       },
       async (input: Record<string, unknown>) => {
         try {
-          if (options.requiresAuth) {
-            const status = await learn.authStatus(false);
-            if (!status.authenticated) return jsonResult(authRequired(status), { isError: true });
-          }
           return jsonResult(await withToolTimeout(handler(input), name), { structured: Boolean(options.outputSchema) });
         } catch (error) {
           // A lapsed SSO session surfaces as a 403 from the API or as absent
@@ -146,7 +139,7 @@ export function createLearnMcpServer(
     "learn_auth_status",
     "Check whether the LEARN session is currently valid.",
     {},
-    async () => learn.authStatus(true),
+    async () => browser.authStatus({ force: true }),
     { requiresAuth: false, outputSchema: AuthStatusSchema }
   );
 
@@ -154,7 +147,7 @@ export function createLearnMcpServer(
     "learn_auth_start",
     "Open Waterloo LEARN in the local browser so the user can complete SSO and MFA by hand, and return the local auth page URL. No Waterloo password is stored or sent to the model.",
     {},
-    async () => learn.authStart(),
+    async () => browser.startManualLogin(),
     { requiresAuth: false, outputSchema: AuthStatusSchema }
   );
 
@@ -162,7 +155,7 @@ export function createLearnMcpServer(
     "learn_auth_save",
     "Persist the authenticated LEARN session so it survives the browser closing.",
     {},
-    async () => learn.authSave(),
+    async () => browser.saveSessionState(),
     { requiresAuth: false, outputSchema: AuthStatusSchema }
   );
 
@@ -170,7 +163,7 @@ export function createLearnMcpServer(
     "learn_auth_reset",
     "Discard the saved LEARN session. Use only when login state is broken; the user must log in again afterwards.",
     {},
-    async () => learn.authReset(),
+    async () => browser.resetSession(),
     { requiresAuth: false, outputSchema: AuthStatusSchema }
   );
 

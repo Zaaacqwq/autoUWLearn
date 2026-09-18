@@ -3,11 +3,6 @@ import path from "node:path";
 import { chromium, type BrowserContext, type Page } from "playwright";
 import type { AuthStatus, AuthState } from "./authTypes.js";
 import { config } from "./config.js";
-import type { FetchTextResult, RenderedPageResult } from "./types.js";
-
-interface PageFetchResult extends FetchTextResult {
-  redirected: boolean;
-}
 
 export class BrowserSession {
   private context?: BrowserContext;
@@ -15,9 +10,6 @@ export class BrowserSession {
   private currentHeadless?: boolean;
   private authPage?: Page;
   private cachedAuth?: { status: AuthStatus; expiresAt: number };
-  private activeDataPages = 0;
-  private readonly dataPageWaiters: Array<() => void> = [];
-  private readonly maxDataPages = 3;
 
   async ensureContext(options: { headless?: boolean } = {}): Promise<BrowserContext> {
     if (this.context && options.headless === undefined) return this.context;
@@ -78,11 +70,15 @@ export class BrowserSession {
     return this.authStatus({ navigate: false, force: true });
   }
 
-  async authStatus(options: { navigate?: boolean; force?: boolean } = {}): Promise<AuthStatus> {
+  async authStatus(
+    options: { navigate?: boolean; force?: boolean; headless?: boolean } = {}
+  ): Promise<AuthStatus> {
     if (!options.force && this.cachedAuth && this.cachedAuth.expiresAt > Date.now()) {
       return this.cachedAuth.status;
     }
-    const page = await this.ensurePage();
+    const page = await this.ensurePage(
+      options.headless === undefined ? {} : { headless: options.headless }
+    );
     if (options.navigate !== false) {
       await page.goto(new URL("/d2l/home", config.learnBaseUrl).toString(), {
         waitUntil: "domcontentloaded"
@@ -91,130 +87,6 @@ export class BrowserSession {
     const status = await this.authStatusFromPage(page);
     this.cachedAuth = { status, expiresAt: Date.now() + 30_000 };
     return status;
-  }
-
-  async fetchText(url: string, init?: { headers?: Record<string, string> }): Promise<FetchTextResult> {
-    return this.withDataPage((page) => this.fetchTextWithPage(page, url, init));
-  }
-
-  private async fetchTextWithPage(page: Page, url: string, init?: { headers?: Record<string, string> }): Promise<FetchTextResult> {
-    await page.setExtraHTTPHeaders(init?.headers ?? {});
-    const response = await page.goto(url, {
-      waitUntil: "domcontentloaded"
-    });
-    if (!response) {
-      throw new Error(`No response while navigating to ${url}`);
-    }
-
-    return {
-      url: response.url(),
-      status: response.status(),
-      ok: response.ok(),
-      contentType: response.headers()["content-type"] ?? "",
-      text: await response.text().catch(() => page.locator("body").innerText())
-    };
-  }
-
-  async fetchRendered(url: string): Promise<RenderedPageResult> {
-    return this.withDataPage(async (page) => {
-      const response = await page.goto(url, { waitUntil: "domcontentloaded" });
-      if (!response) throw new Error(`No response while navigating to ${url}`);
-      await page
-        .waitForFunction(() =>
-          [...document.querySelectorAll("d2l-html-block")].some(
-            (element) => element.shadowRoot?.textContent?.trim()
-          )
-        )
-        .catch(() => undefined);
-
-      const rendered = await page.evaluate(() => {
-        const blocks = [...document.querySelectorAll("d2l-html-block")].map((element) => {
-          const root = element.shadowRoot;
-          return {
-            text: root
-              ? [...root.children]
-                  .map((child) => (child as HTMLElement).innerText || child.textContent || "")
-                  .join("\n")
-                  .trim()
-              : "",
-            links: root
-              ? [...root.querySelectorAll("a[href]")].map((anchor) => ({
-                  label: (anchor.textContent ?? "").replace(/\s+/g, " ").trim(),
-                  url: (anchor as HTMLAnchorElement).href
-                }))
-              : []
-          };
-        });
-        return {
-          title: document.title,
-          renderedText: document.body.innerText,
-          shadowBlocks: blocks
-        };
-      });
-
-      return {
-        url: response.url(),
-        status: response.status(),
-        ok: response.ok(),
-        contentType: response.headers()["content-type"] ?? "",
-        text: await response.text().catch(() => ""),
-        ...rendered
-      };
-    });
-  }
-
-  private async withDataPage<T>(operation: (page: Page) => Promise<T>): Promise<T> {
-    await this.acquireDataPageSlot();
-    let page: Page | undefined;
-    try {
-      const context = await this.ensureContext();
-      page = await context.newPage();
-      page.setDefaultNavigationTimeout(Math.min(config.navigationTimeoutMs, 10_000));
-      page.setDefaultTimeout(Math.min(config.navigationTimeoutMs, 10_000));
-      return await operation(page);
-    } finally {
-      await page?.close().catch(() => undefined);
-      this.releaseDataPageSlot();
-    }
-  }
-
-  private async acquireDataPageSlot(): Promise<void> {
-    if (this.activeDataPages < this.maxDataPages) {
-      this.activeDataPages += 1;
-      return;
-    }
-    await new Promise<void>((resolve) => this.dataPageWaiters.push(resolve));
-    this.activeDataPages += 1;
-  }
-
-  private releaseDataPageSlot(): void {
-    this.activeDataPages -= 1;
-    this.dataPageWaiters.shift()?.();
-  }
-
-  async download(url: string, destinationPath: string): Promise<{
-    url: string;
-    status: number;
-    contentType: string;
-    bytes: number;
-    path: string;
-  }> {
-    const context = await this.ensureContext();
-    const response = await context.request.get(url, {
-      headers: {
-        Accept: "*/*"
-      }
-    });
-    const body = await response.body();
-    await fs.mkdir(path.dirname(destinationPath), { recursive: true });
-    await fs.writeFile(destinationPath, body);
-    return {
-      url,
-      status: response.status(),
-      contentType: response.headers()["content-type"] ?? "",
-      bytes: body.byteLength,
-      path: destinationPath
-    };
   }
 
   /**
@@ -239,7 +111,17 @@ export class BrowserSession {
    * Returns false when SSO wants a password, which only a human can supply.
    */
   async refreshSession(): Promise<boolean> {
-    const status = await this.authStatus({ navigate: true, force: true });
+    // Explicitly headless when we start the browser ourselves: this runs
+    // unattended on a server, where a window nobody can see is at best startup
+    // cost and at worst a hang, and LEARN_HEADLESS exists for interactive login
+    // rather than to decide what recovery does. An already-open context is left
+    // alone — switching modes closes it, and it may be the very window a human
+    // is completing SSO in right now.
+    const status = await this.authStatus({
+      navigate: true,
+      force: true,
+      ...(this.context ? {} : { headless: true })
+    });
     if (!status.authenticated) return false;
     await this.saveSessionState().catch(() => undefined);
     return true;
