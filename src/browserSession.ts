@@ -1,8 +1,19 @@
 import fs from "node:fs/promises";
 import path from "node:path";
 import { chromium, type BrowserContext, type Page } from "playwright";
-import type { AuthStatus, AuthState } from "./authTypes.js";
+import { messageForState, resolveAuthState } from "./authState.js";
+import type { AuthStatus } from "./authTypes.js";
 import { config } from "./config.js";
+import { cookieHeaderFromCookies, type SessionCookie } from "./cookieSource.js";
+import { createLearnApi, type LearnApi } from "./learnApi.js";
+
+export interface BrowserSessionDeps {
+  /**
+   * Whether a cookie jar authenticates a LEARN read. Injected by tests; the
+   * default asks LEARN, which is the only answer that agrees with the tools.
+   */
+  readonly sessionWorks?: (cookies: readonly SessionCookie[]) => Promise<boolean>;
+}
 
 export class BrowserSession {
   private context?: BrowserContext;
@@ -10,6 +21,10 @@ export class BrowserSession {
   private currentHeadless?: boolean;
   private authPage?: Page;
   private cachedAuth?: { status: AuthStatus; expiresAt: number };
+  private probeApi?: LearnApi;
+  private probeCookieHeader = "";
+
+  constructor(private readonly deps: BrowserSessionDeps = {}) {}
 
   async ensureContext(options: { headless?: boolean } = {}): Promise<BrowserContext> {
     if (this.context && options.headless === undefined) return this.context;
@@ -175,13 +190,49 @@ export class BrowserSession {
     };
   }
 
+  /**
+   * Whether the context's cookies authenticate a read, which is the same
+   * question every tool asks and so the only one worth answering here.
+   */
+  private async sessionWorks(cookies: readonly SessionCookie[]): Promise<boolean> {
+    if (this.deps.sessionWorks) return this.deps.sessionWorks(cookies);
+
+    try {
+      this.probeCookieHeader = cookieHeaderFromCookies(cookies, new URL(config.learnBaseUrl).hostname);
+    } catch {
+      // Neither session cookie is present: no need to ask LEARN.
+      return false;
+    }
+
+    this.probeApi ??= createLearnApi({
+      baseUrl: config.learnBaseUrl,
+      cookieHeader: () => this.probeCookieHeader
+    });
+
+    try {
+      await this.probeApi.whoami();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   private async authStatusFromPage(page: Page): Promise<AuthStatus> {
     const url = page.url();
     const title = await page.title().catch(() => "");
-    const bodyText = await page.locator("body").innerText().catch(() => "");
-    const state = detectLoginState(url, title, bodyText);
+    const cookies = await page.context().cookies().catch(() => []);
+
+    const works = await this.sessionWorks(cookies);
+    // Only read the page when there is a failure to explain: innerText on a
+    // half-rendered Brightspace page is both slow and, as the state machine
+    // used to prove, misleading.
+    const bodyText = works ? "" : await page.locator("body").innerText().catch(() => "");
+
+    const state = resolveAuthState({ sessionWorks: works, url, title, bodyText });
     const authenticated = state === "LOGGED_IN";
     if (authenticated) {
+      // Persist as soon as the session is known good, so a user who closes the
+      // window without pressing Save keeps the login they just completed.
       await fs.mkdir(path.dirname(config.storageStatePath), { recursive: true }).catch(() => undefined);
       await page.context().storageState({ path: config.storageStatePath }).catch(() => undefined);
     }
@@ -208,46 +259,5 @@ export class BrowserSession {
     } catch {
       // No saved storage state yet, or it is unreadable. The persistent profile is still used.
     }
-  }
-}
-
-function detectLoginState(url: string, title: string, bodyText: string): AuthState {
-  const text = `${title}\n${bodyText}`.slice(0, 12_000);
-  if (/\/d2l\/home/i.test(url) && /\b(My Courses|Course|Homepage|Brightspace)\b/i.test(text)) return "LOGGED_IN";
-  if (/\/d2l\//i.test(url) && /\b(My Courses|Course|Brightspace|navbar|profile)\b/i.test(text)) return "LOGGED_IN";
-  if (/\b(approve sign in request|approve.*phone|push notification|check your.*phone)\b/i.test(text)) {
-    return "MFA_PUSH_WAITING";
-  }
-  if (/\b(enter code|verification code|code displayed|number shown|authenticator code)\b/i.test(text)) {
-    return "MFA_CODE_REQUIRED";
-  }
-  if (/\b(Duo|Microsoft Authenticator|Verify your identity|multi-factor|multifactor|two-step|two factor)\b/i.test(text)) {
-    return "MFA_REQUIRED";
-  }
-  if (/\b(password|enter password)\b/i.test(text) || /pwd|passwd|password/i.test(url)) return "PASSWORD_REQUIRED";
-  if (/adfs|login\.microsoftonline|signin|saml|login/i.test(url) || /\b(sign in|University of Waterloo)\b/i.test(text)) {
-    return "LOGIN_PAGE";
-  }
-  if (url === "about:blank") return "UNKNOWN";
-  return "NOT_LOGGED_IN";
-}
-
-function messageForState(state: AuthState): string {
-  switch (state) {
-    case "LOGGED_IN":
-      return "UW LEARN session is active.";
-    case "PASSWORD_REQUIRED":
-      return "Complete Waterloo password entry in the opened browser window.";
-    case "MFA_REQUIRED":
-    case "MFA_PUSH_WAITING":
-      return "Complete MFA in the opened browser window or approve the request on your phone.";
-    case "MFA_CODE_REQUIRED":
-      return "Enter the MFA verification code in the opened browser window.";
-    case "LOGIN_PAGE":
-    case "NOT_LOGGED_IN":
-    case "SESSION_EXPIRED":
-      return "UW LEARN login is required. Open the local auth page and complete Waterloo SSO/MFA.";
-    default:
-      return "UW LEARN auth state is unknown. Check the local auth page.";
   }
 }

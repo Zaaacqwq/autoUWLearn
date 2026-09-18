@@ -171,6 +171,23 @@ Three things about them decide how long the server stays logged in:
    expiry and both must be classified as such, or they surface as an
    unactionable HTTP error and no recovery is attempted.
 
+### Whether you are logged in is not visible on the page
+
+Two things make the browser a poor witness to its own session:
+
+- Brightspace renders the homepage with JavaScript. At `domcontentloaded` the
+  body of a healthy session is still a skeleton, so the phrases that identify it
+  ("My Courses") have not appeared, while the title already carries "University
+  of Waterloo" — which reads like the login page.
+- D2L lands SSO on its own URLs, `/d2l/lp/auth/login/ProcessLoginActions.d2l`
+  and `/d2l/lp/auth/saml/...`. Both contain `login` or `saml`, and both are
+  where the browser sits immediately after a *successful* login.
+
+So a login that worked looks like one that failed, and the user is sent to do it
+again. Ask `whoami` with the context's cookies instead: it is the same question
+the tools ask, so the answer agrees with them by construction. The page is worth
+reading only to explain a failure — whether SSO wants a password or Duo.
+
 Recovery is a headless navigation to `/d2l/home` in the persistent browser
 profile. It works because Waterloo's upstream identity session outlives the
 Brightspace one and Duo remembers the device for weeks; it fails, and needs a

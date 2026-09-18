@@ -55,7 +55,9 @@ It opens LEARN in a local browser and waits while you complete Waterloo SSO/MFA 
 ssh -L 8787:127.0.0.1:8787 <host>
 ```
 
-The login window appears on the server's own display, so drive it there or over screen sharing. Press **Save session** afterwards to persist the cookies; reads then work with the browser closed.
+The login window appears on the server's own display, so drive it there or over screen sharing. The session is saved as soon as it is confirmed working — the page checks every few seconds — so reads keep working with the browser closed, and **Save session** is only there to force it.
+
+Confirmation is a real LEARN read, not a look at the page: Brightspace renders its homepage with JavaScript and lands SSO on URLs of its own with `login` in them, so a session that works can look, to anything reading the page, exactly like one that does not.
 
 ## Staying logged in
 
