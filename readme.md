@@ -69,6 +69,8 @@ Typing a password should be rare. Three mechanisms keep it that way, and they ma
 
 Only when that re-login needs a password do tools return `AUTH_REQUIRED` with the auth URL. `/health` reports the session state, so a lapse is visible without asking a tool.
 
+`learn_auth_status` answers from the saved session and never starts a browser: the cookies are on disk and LEARN will say whether they work, so the check costs one request and cannot hang. Only `learn_auth_start` and `learn_auth_reset` drive a browser, and they are given a longer deadline to do it.
+
 ## Running
 
 ```bash

@@ -87,7 +87,7 @@ export function createLearnMcpServer(
     description: string,
     inputSchema: z.ZodRawShape,
     handler: (input: Record<string, unknown>) => Promise<unknown> | unknown,
-    options: { recoversSession?: boolean; outputSchema?: z.ZodTypeAny } = {}
+    options: { recoversSession?: boolean; outputSchema?: z.ZodTypeAny; timeoutMs?: number } = {}
   ) {
     recordToolDoc({
       name,
@@ -116,7 +116,9 @@ export function createLearnMcpServer(
           const run = options.recoversSession === false
             ? () => Promise.resolve(handler(input))
             : () => recovery.run(async () => handler(input));
-          return jsonResult(await withToolTimeout(run(), name), { structured: Boolean(options.outputSchema) });
+          return jsonResult(await withToolTimeout(run(), name, options.timeoutMs), {
+            structured: Boolean(options.outputSchema)
+          });
         } catch (error) {
           // A lapsed SSO session surfaces as a 403 from the API or as absent
           // cookies on disk. Either way the fix is the same: log in again.
@@ -152,9 +154,9 @@ export function createLearnMcpServer(
 
   registerReadOnlyTool(
     "learn_auth_status",
-    "Check whether the LEARN session is currently valid.",
+    "Check whether the LEARN session is currently valid. Answers from the saved session without starting a browser, so it is safe to call before anything else.",
     {},
-    async () => browser.authStatus({ force: true }),
+    async () => browser.sessionStatus(),
     { recoversSession: false, outputSchema: AuthStatusSchema }
   );
 
@@ -163,7 +165,7 @@ export function createLearnMcpServer(
     "Open Waterloo LEARN in the local browser so the user can complete SSO and MFA by hand, and return the local auth page URL. No Waterloo password is stored or sent to the model.",
     {},
     async () => browser.startManualLogin(),
-    { recoversSession: false, outputSchema: AuthStatusSchema }
+    { recoversSession: false, outputSchema: AuthStatusSchema, timeoutMs: LOGIN_TOOL_TIMEOUT_MS }
   );
 
   registerReadOnlyTool(
@@ -179,7 +181,7 @@ export function createLearnMcpServer(
     "Discard the saved LEARN session. Use only when login state is broken; the user must log in again afterwards.",
     {},
     async () => browser.resetSession(),
-    { recoversSession: false, outputSchema: AuthStatusSchema }
+    { recoversSession: false, outputSchema: AuthStatusSchema, timeoutMs: LOGIN_TOOL_TIMEOUT_MS }
   );
 
   /* Reads, served from the Valence JSON API. Each takes an optional courseQuery
@@ -273,15 +275,34 @@ export function createLearnMcpServer(
   return { server, browser };
 }
 
-async function withToolTimeout<T>(operation: Promise<T> | T, toolName: string): Promise<T> {
+/** Reads answer from the API and must stay snappy. */
+const DEFAULT_TOOL_TIMEOUT_MS = 20_000;
+
+/**
+ * Starting a login is the one tool that legitimately takes its time: it launches
+ * a browser and walks into Waterloo's SSO. Holding it to the deadline meant for
+ * an API read reported a timeout for work that was proceeding normally.
+ */
+const LOGIN_TOOL_TIMEOUT_MS = 90_000;
+
+async function withToolTimeout<T>(
+  operation: Promise<T> | T,
+  toolName: string,
+  timeoutMs = DEFAULT_TOOL_TIMEOUT_MS
+): Promise<T> {
   let timeout: NodeJS.Timeout | undefined;
   try {
     return await Promise.race([
       Promise.resolve(operation),
       new Promise<never>((_resolve, reject) => {
         timeout = setTimeout(
-          () => reject(new Error(`LEARN_TIMEOUT: ${toolName} exceeded the 20 second tool deadline.`)),
-          20_000
+          () =>
+            reject(
+              new Error(
+                `LEARN_TIMEOUT: ${toolName} exceeded the ${Math.round(timeoutMs / 1000)} second tool deadline.`
+              )
+            ),
+          timeoutMs
         );
       })
     ]);

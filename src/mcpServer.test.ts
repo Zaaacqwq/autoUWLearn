@@ -111,6 +111,12 @@ function fakeApi(overrides: { readonly failAll?: Error } = {}) {
 }
 
 class FakeBrowser extends BrowserSession {
+  override async sessionStatus(): Promise<AuthStatus> {
+    return this.authStatus();
+  }
+  override async refreshSession(): Promise<boolean> {
+    return true;
+  }
   override async authStatus(): Promise<AuthStatus> {
     return {
       ok: true,

@@ -2,9 +2,9 @@ import fs from "node:fs/promises";
 import path from "node:path";
 import { chromium, type BrowserContext, type Page } from "playwright";
 import { messageForState, resolveAuthState } from "./authState.js";
-import type { AuthStatus } from "./authTypes.js";
+import type { AuthState, AuthStatus } from "./authTypes.js";
 import { config } from "./config.js";
-import { cookieHeaderFromCookies, type SessionCookie } from "./cookieSource.js";
+import { cookieHeaderFromCookies, cookiesFromStorageState, type SessionCookie } from "./cookieSource.js";
 import { createLearnApi, type LearnApi } from "./learnApi.js";
 
 export interface BrowserSessionDeps {
@@ -85,6 +85,58 @@ export class BrowserSession {
     return this.authStatus({ navigate: false, force: true });
   }
 
+  /**
+   * The session as the tools see it, without starting a browser.
+   *
+   * "Am I logged in?" needs no browser to answer — the cookies are on disk, and
+   * LEARN will say whether they work. Answering it by launching Chromium and
+   * navigating to /d2l/home put a browser start-up and a full SSO redirect
+   * chain inside a 20 second tool deadline, which is how a question about the
+   * session became a timeout that said nothing about the session at all.
+   *
+   * A browser that happens to be open is still asked to explain a failure,
+   * since it is the one that knows whether SSO is waiting on Duo. One is never
+   * started for that.
+   */
+  async sessionStatus(): Promise<AuthStatus> {
+    const cookies = (await this.liveCookies()) ?? cookiesFromStorageState(config.storageStatePath);
+
+    if (await this.sessionWorks(cookies)) {
+      // Keep a session proven good by a live context, in case nothing else does.
+      if (this.context) await this.persistStorageState(this.context);
+      return this.status("LOGGED_IN", config.learnBaseUrl, "");
+    }
+
+    const page = this.authPage && !this.authPage.isClosed() ? this.authPage : undefined;
+    if (!page) {
+      return this.status(cookies.length === 0 ? "NOT_LOGGED_IN" : "SESSION_EXPIRED", config.learnBaseUrl, "");
+    }
+
+    const url = page.url();
+    const title = await page.title().catch(() => "");
+    const bodyText = await page.locator("body").innerText({ timeout: 2_000 }).catch(() => "");
+    return this.status(resolveAuthState({ sessionWorks: false, url, title, bodyText }), url, title);
+  }
+
+  private status(state: AuthState, url: string, title: string): AuthStatus {
+    const authenticated = state === "LOGGED_IN";
+    return {
+      ok: authenticated,
+      authenticated,
+      state,
+      url,
+      title,
+      message: messageForState(state),
+      authUrl: config.authUrl
+    };
+  }
+
+  private async persistStorageState(context: BrowserContext): Promise<void> {
+    await fs.mkdir(path.dirname(config.storageStatePath), { recursive: true }).catch(() => undefined);
+    await context.storageState({ path: config.storageStatePath }).catch(() => undefined);
+  }
+
+  /** Drives the browser to find out. Only login and recovery need this. */
   async authStatus(
     options: { navigate?: boolean; force?: boolean; headless?: boolean } = {}
   ): Promise<AuthStatus> {
@@ -151,10 +203,11 @@ export class BrowserSession {
   }
 
   async saveSessionState(): Promise<AuthStatus> {
-    const status = await this.authStatus({ navigate: false });
-    if (!status.authenticated) return status;
-    await fs.mkdir(path.dirname(config.storageStatePath), { recursive: true });
-    await this.context?.storageState({ path: config.storageStatePath });
+    // Whatever there is to save lives in an open context, so never start one:
+    // a browser launched here would have no session in it to write down.
+    const status = await this.sessionStatus();
+    if (!status.authenticated || !this.context) return status;
+    await this.persistStorageState(this.context);
     return {
       ...status,
       message: `UW LEARN session is active and saved to ${config.storageStatePath}.`
@@ -204,9 +257,15 @@ export class BrowserSession {
       return false;
     }
 
+    // Bounded and never retried: this answers "is the session alive", and an
+    // unreachable LEARN must produce that answer quickly rather than sit inside
+    // the caller's deadline until it expires.
     this.probeApi ??= createLearnApi({
       baseUrl: config.learnBaseUrl,
-      cookieHeader: () => this.probeCookieHeader
+      cookieHeader: () => this.probeCookieHeader,
+      maxRetries: 0,
+      fetchImpl: (input, init) =>
+        fetch(input, { ...init, signal: AbortSignal.timeout(config.sessionProbeTimeoutMs) })
     });
 
     try {
@@ -226,25 +285,15 @@ export class BrowserSession {
     // Only read the page when there is a failure to explain: innerText on a
     // half-rendered Brightspace page is both slow and, as the state machine
     // used to prove, misleading.
-    const bodyText = works ? "" : await page.locator("body").innerText().catch(() => "");
+    const bodyText = works ? "" : await page.locator("body").innerText({ timeout: 2_000 }).catch(() => "");
 
     const state = resolveAuthState({ sessionWorks: works, url, title, bodyText });
-    const authenticated = state === "LOGGED_IN";
-    if (authenticated) {
+    if (state === "LOGGED_IN") {
       // Persist as soon as the session is known good, so a user who closes the
       // window without pressing Save keeps the login they just completed.
-      await fs.mkdir(path.dirname(config.storageStatePath), { recursive: true }).catch(() => undefined);
-      await page.context().storageState({ path: config.storageStatePath }).catch(() => undefined);
+      await this.persistStorageState(page.context());
     }
-    return {
-      ok: authenticated,
-      authenticated,
-      state,
-      url,
-      title,
-      message: messageForState(state),
-      authUrl: config.authUrl
-    };
+    return this.status(state, url, title);
   }
 
   private async restoreSessionState(context: BrowserContext): Promise<void> {

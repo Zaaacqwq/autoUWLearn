@@ -22,7 +22,9 @@ export const config = {
     process.env.LEARN_DOWNLOAD_DIR ??
     path.resolve(os.homedir(), ".uwlearn-mcp", "downloads"),
   headless: boolEnv(process.env.LEARN_HEADLESS, false),
-  navigationTimeoutMs: Number(process.env.LEARN_NAVIGATION_TIMEOUT_MS ?? 30_000)
+  navigationTimeoutMs: Number(process.env.LEARN_NAVIGATION_TIMEOUT_MS ?? 30_000),
+  /** A session check must answer quickly or admit it cannot; it never retries. */
+  sessionProbeTimeoutMs: Number(process.env.LEARN_SESSION_PROBE_TIMEOUT_MS ?? 5_000)
 };
 
 export function absoluteLearnUrl(input: string): string {

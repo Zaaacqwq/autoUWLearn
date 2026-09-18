@@ -182,7 +182,7 @@ function requireLocalAuthUi(req: Request, res: Response): boolean {
 
 app.get("/auth", async (req: Request, res: Response) => {
   if (!requireLocalAuthUi(req, res)) return;
-  const status = await sharedBrowser.authStatus({ navigate: false, force: true }).catch((error) => ({
+  const status = await sharedBrowser.sessionStatus().catch((error) => ({
     ok: false,
     authenticated: false,
     state: "UNKNOWN" as const,
@@ -196,7 +196,7 @@ app.get("/auth", async (req: Request, res: Response) => {
 
 app.get("/auth/status", async (req: Request, res: Response) => {
   if (!requireLocalAuthUi(req, res)) return;
-  res.json(await sharedBrowser.authStatus({ navigate: false, force: true }).catch((error) => ({
+  res.json(await sharedBrowser.sessionStatus().catch((error) => ({
     ok: false,
     authenticated: false,
     state: "UNKNOWN",
@@ -227,10 +227,10 @@ app.post("/auth/start", async (req: Request, res: Response) => {
 app.post("/auth/wait", async (req: Request, res: Response) => {
   if (!requireLocalAuthUi(req, res)) return;
   const deadline = Date.now() + 120_000;
-  let status = await sharedBrowser.authStatus({ navigate: false, force: true });
+  let status = await sharedBrowser.sessionStatus();
   while (!status.authenticated && Date.now() < deadline) {
     await new Promise((resolve) => setTimeout(resolve, 2_000));
-    status = await sharedBrowser.authStatus({ navigate: false, force: true });
+    status = await sharedBrowser.sessionStatus();
   }
   res.json(status);
 });
@@ -400,7 +400,8 @@ function renderAuthPage(status: unknown): string {
     <h1>UW LEARN MCP Auth</h1>
     <div class="box">
       <p>This page controls the local Playwright browser session. It does not store your UW password.</p>
-      <p class="muted">Click Start login, complete Waterloo SSO/MFA in the opened browser window, then refresh status.</p>
+      <p class="muted">Click Start login, then complete Waterloo SSO/MFA in the browser window that opens. Status below refreshes every few seconds and saves the session as soon as it confirms one, so there is nothing else you need to press.</p>
+      <p class="muted">"Logged in" here means a real LEARN read succeeded with these cookies &mdash; the same thing the tools do &mdash; not that the page looks right.</p>
       <button onclick="post('/auth/start')">Start login</button>
       <button onclick="refreshStatus()">Check status</button>
       <button onclick="post('/auth/wait')">Wait for login</button>

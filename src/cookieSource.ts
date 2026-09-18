@@ -47,7 +47,8 @@ function matchesHost(cookieDomain: string, host: string): boolean {
   return host === parent || host.endsWith(cookieDomain);
 }
 
-function readCookies(storageStatePath: string): StorageStateCookie[] {
+/** The saved cookie jar, or an empty one when there is no readable snapshot. */
+export function cookiesFromStorageState(storageStatePath: string): StorageStateCookie[] {
   try {
     const parsed = JSON.parse(fs.readFileSync(storageStatePath, "utf8")) as {
       cookies?: StorageStateCookie[];
@@ -67,5 +68,5 @@ function readCookies(storageStatePath: string): StorageStateCookie[] {
  * returns, and the two demand different responses from the caller.
  */
 export function cookieHeaderFromStorageState(storageStatePath: string, host: string): string {
-  return cookieHeaderFromCookies(readCookies(storageStatePath), host);
+  return cookieHeaderFromCookies(cookiesFromStorageState(storageStatePath), host);
 }
