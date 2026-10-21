@@ -31,7 +31,7 @@
   },
   "homepage": "https://github.com/Zaaacqwq/autoUWLearn#readme",
   "dependencies": {
-    "@modelcontextprotocol/sdk": "^1.29.0",
+    "@modelcontextprotocol/sdk": "^1.32.0",
     "cheerio": "^1.2.0",
     "mime-types": "^3.0.2",
     "playwright": "^1.61.0",
