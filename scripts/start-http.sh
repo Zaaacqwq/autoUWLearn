@@ -28,6 +28,8 @@ done
 
 STATE_HOME="${LEARN_STATE_HOME:-$HOME/.uwlearn-mcp}"
 
+# production 模式下 express 不会把错误栈回显给客户端（该服务经 cloudflared 暴露在公网）
+export NODE_ENV="${NODE_ENV:-production}"
 export LEARN_MCP_HOST="${LEARN_MCP_HOST:-127.0.0.1}"
 export LEARN_MCP_PORT="${LEARN_MCP_PORT:-8787}"
 export LEARN_AUTH_URL="${LEARN_AUTH_URL:-http://127.0.0.1:${LEARN_MCP_PORT:-8787}/auth}"
@@ -38,4 +40,4 @@ export LEARN_STORAGE_STATE_PATH="${LEARN_STORAGE_STATE_PATH:-$STATE_HOME/storage
 export LEARN_OAUTH_TOKEN_STORE_PATH="${LEARN_OAUTH_TOKEN_STORE_PATH:-$STATE_HOME/oauth-tokens.json}"
 export LEARN_DOWNLOAD_DIR="${LEARN_DOWNLOAD_DIR:-$STATE_HOME/downloads}"
 
-exec node dist/httpServer.js
+exec "${NODE_BIN:-node}" dist/httpServer.js
