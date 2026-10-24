@@ -36,6 +36,17 @@ export class LearnPermissionError extends Error {
   }
 }
 
+/** A file bigger than the caller agreed to hold; nothing past the limit was read. */
+export class LearnFileTooLargeError extends Error {
+  readonly maxBytes: number;
+
+  constructor(path: string, maxBytes: number) {
+    super(`${path} is larger than ${Math.round(maxBytes / 1024 / 1024)} MB; refusing to download it.`);
+    this.name = "LearnFileTooLargeError";
+    this.maxBytes = maxBytes;
+  }
+}
+
 export class LearnNetworkError extends Error {
   constructor(path: string, cause: unknown) {
     super(`LEARN request to ${path} failed: ${cause instanceof Error ? cause.message : String(cause)}`);
@@ -67,6 +78,11 @@ export interface FetchedFile {
   readonly bytes: Uint8Array;
   readonly contentType: string;
   readonly url: string;
+}
+
+export interface FetchFileOptions {
+  /** Refuse a file larger than this, without reading past it. */
+  readonly maxBytes?: number;
 }
 
 export interface WhoAmI {
@@ -104,7 +120,14 @@ export interface LearnApi {
   warmUp(): Promise<ApiVersions>;
   versions(): Promise<ApiVersions>;
   getJson<T = unknown>(path: string): Promise<T>;
-  fetchFile(path: string): Promise<FetchedFile>;
+  fetchFile(path: string, options?: FetchFileOptions): Promise<FetchedFile>;
+  /** A file attached to an assignment folder: its instructions' handouts. */
+  fetchAttachment(
+    orgUnitId: number | string,
+    folderId: number | string,
+    fileId: number | string,
+    options?: FetchFileOptions
+  ): Promise<FetchedFile>;
   /** Cheapest authenticated call; used to probe whether the session is alive. */
   whoami(): Promise<WhoAmI>;
   /**
@@ -157,6 +180,43 @@ const leftTheLearnHost = (response: Response, baseUrl: string): boolean => {
     return false;
   }
 };
+
+/**
+ * Reads a body, stopping at `maxBytes`. The declared length is checked first,
+ * but it is not trusted: a body without one, or with a wrong one, is counted.
+ */
+async function readCapped(response: Response, path: string, maxBytes: number | undefined): Promise<Uint8Array> {
+  if (maxBytes === undefined) return new Uint8Array(await response.arrayBuffer());
+
+  const declared = Number(response.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await response.body?.cancel().catch(() => undefined);
+    throw new LearnFileTooLargeError(path, maxBytes);
+  }
+  if (!response.body) return new Uint8Array(0);
+
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  const reader = response.body.getReader();
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw new LearnFileTooLargeError(path, maxBytes);
+    }
+    chunks.push(value);
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return bytes;
+}
 
 const sleep = (ms: number): Promise<void> =>
   ms <= 0 ? Promise.resolve() : new Promise((resolve) => setTimeout(resolve, ms));
@@ -273,11 +333,28 @@ export function createLearnApi(options: LearnApiOptions): LearnApi {
    * Downloads a course file. Restricted to LEARN's enforced content path so a
    * caller cannot turn this into a general fetcher pointed at any URL.
    */
-  async function fetchFile(path: string): Promise<FetchedFile> {
+  async function fetchFile(path: string, fileOptions: FetchFileOptions = {}): Promise<FetchedFile> {
     if (!path.startsWith(ENFORCED_CONTENT_PREFIX)) {
       throw new Error(`Refusing to download a path outside ${ENFORCED_CONTENT_PREFIX}: ${path}`);
     }
+    return download(path, fileOptions);
+  }
 
+  /** The path is built here from ids, never taken from a caller, for the same reason. */
+  async function fetchAttachment(
+    orgUnitId: number | string,
+    folderId: number | string,
+    fileId: number | string,
+    fileOptions: FetchFileOptions = {}
+  ): Promise<FetchedFile> {
+    const ids = [orgUnitId, folderId, fileId].map(String);
+    if (!ids.every((id) => /^\d+$/.test(id))) {
+      throw new Error(`Refusing to download an attachment with a non-numeric id: ${ids.join("/")}`);
+    }
+    return download(await le(ids[0], `dropbox/folders/${ids[1]}/attachments/${ids[2]}`), fileOptions);
+  }
+
+  async function download(path: string, fileOptions: FetchFileOptions): Promise<FetchedFile> {
     const url = new URL(path, baseUrl).toString();
     const requestHeaders = { Cookie: await options.cookieHeader(), Accept: "*/*" };
     const response = absorb(await limited(() => fetchImpl(url, { redirect: "follow", headers: requestHeaders })));
@@ -287,7 +364,7 @@ export function createLearnApi(options: LearnApiOptions): LearnApi {
     if (!response.ok) throw new LearnHttpError(response.status, path);
 
     return {
-      bytes: new Uint8Array(await response.arrayBuffer()),
+      bytes: await readCapped(response, path, fileOptions.maxBytes),
       contentType: response.headers.get("content-type") ?? "application/octet-stream",
       url
     };
@@ -325,6 +402,7 @@ export function createLearnApi(options: LearnApiOptions): LearnApi {
     warmUp: versions,
     getJson,
     fetchFile,
+    fetchAttachment,
     whoami,
     calendarEvents,
     fetchHtml,

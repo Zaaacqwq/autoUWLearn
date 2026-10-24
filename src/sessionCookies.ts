@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
 import {
@@ -122,7 +123,9 @@ function persist(storageStatePath: string, rotated: readonly ParsedSetCookie[]):
   if (written.length === 0) return [];
 
   const next: StorageState = { ...state, cookies: [...byIdentity.values()] };
-  const temporary = `${storageStatePath}.${process.pid}.tmp`;
+  // Unique per write, not just per process: the browser's own save runs in this
+  // process too, and two writers sharing a temporary name corrupt each other.
+  const temporary = `${storageStatePath}.${process.pid}.${randomUUID()}.tmp`;
   try {
     fs.mkdirSync(path.dirname(storageStatePath), { recursive: true });
     fs.writeFileSync(temporary, JSON.stringify(next), { mode: 0o600 });

@@ -27,6 +27,8 @@ interface FakeData {
   files?: Record<string, { bytes: Uint8Array; contentType: string }>;
   fail?: Record<string, Error>;
   failHtml?: boolean;
+  /** Only the quiz list fails, as it does for a course with no quizzes. */
+  failQuizHtml?: boolean;
 }
 
 function fakeApi(data: FakeData) {
@@ -43,6 +45,7 @@ function fakeApi(data: FakeData) {
     calendarEvents: (ou: string | number) => pick(data.events, ou, [] as unknown[]),
     fetchHtml: async (path: string) => {
       if (data.failHtml) throw new Error("status page unavailable");
+      if (data.failQuizHtml && /quizzing/.test(path)) throw new LearnPermissionError(path);
       const ou = /[?&]ou=(\d+)/.exec(path)?.[1] ?? "";
       const table = /quizzing/.test(path) ? data.quizHtml : data.dropboxHtml;
       return table?.[ou] ?? "";
@@ -306,6 +309,17 @@ test("an unreadable status page yields unknown rather than failing the request",
   assert.equal(items[0].submissionStatus, "unknown");
 });
 
+test("a course whose quiz page is forbidden still reports its assignments' status", async () => {
+  // HIST 232 has no quizzes; its quiz list answers 403 while the dropbox list reads fine.
+  const svc = service({
+    events: { "100": [dueEvent(1, "Reflection Journal 2", day(2), DROPBOX, 412765)] },
+    dropboxHtml: { "100": dropboxRows([["Reflection Journal 2", "Not Submitted", 412765]]) },
+    failQuizHtml: true
+  });
+
+  assert.equal((await svc.upcoming({})).items[0].submissionStatus, "not_submitted");
+});
+
 test("renders the deadline in the configured timezone alongside the UTC instant", async () => {
   // 2026-07-16T03:59Z is 11:59 p.m. on July 15 in Toronto: the date differs.
   const svc = service({ events: { "100": [dueEvent(1, "Assignment 4", "2026-07-16T03:59:00.000Z", MODULE)] } });
@@ -434,4 +448,128 @@ test("readTopic truncates very long documents and says so", async () => {
   const result = await svc.readTopic({ topicQuery: "lecture 01", courseQuery: "ECE 318", maxChars: 5 });
   assert.equal(result.truncated, true);
   assert.equal(result.text?.length, 5);
+});
+
+const folder = (id: number, name: string, extra: Record<string, unknown> = {}) => ({
+  Id: id,
+  Name: name,
+  DueDate: day(3),
+  IsHidden: false,
+  ...extra
+});
+
+test("assignment returns the instructions as text, with attachments, links and status", async () => {
+  const svc = service({
+    rawAssignments: {
+      "101": [
+        folder(77, "Lab 2 Report", {
+          CustomInstructions: { Text: "", Html: "<p>Implement <b>TCP</b> over UDP.</p><ul><li>task 1</li><li>task 2</li></ul>" },
+          Attachments: [{ FileId: 5, FileName: "lab2_starter_code.zip", Size: 2048 }],
+          LinkAttachments: [{ LinkId: 1, LinkName: "Spec", Href: "https://example.com/spec" }]
+        })
+      ]
+    },
+    dropboxHtml: { "101": dropboxRows([["Lab 2 Report", "Not Submitted", 77]]) }
+  });
+
+  const result = await svc.assignment({ assignmentQuery: "lab 2", courseQuery: "ECE 318" });
+  assert.equal(result.status, "ok");
+  const found = result.assignment!;
+  assert.equal(found.id, "77");
+  assert.equal(found.courseLabel, "ECE 318");
+  assert.equal(found.orgUnitId, "101");
+  assert.equal(found.instructions, "Implement TCP over UDP.\n- task 1\n- task 2");
+  assert.deepEqual(found.attachments, [{ fileId: "5", name: "lab2_starter_code.zip", size: 2048 }]);
+  assert.deepEqual(found.links, [{ name: "Spec", url: "https://example.com/spec" }]);
+  assert.equal(found.submissionStatus, "not_submitted");
+  assert.ok(found.dueAtLocal, "the deadline is rendered locally too");
+});
+
+test("assignment prefers the plain-text rendering when LEARN supplies one", async () => {
+  const svc = service({
+    rawAssignments: { "100": [folder(1, "Essay", { CustomInstructions: { Text: "Write 500 words.", Html: "<p>ignored</p>" } })] }
+  });
+  assert.equal((await svc.assignment({ assignmentQuery: "essay" })).assignment?.instructions, "Write 500 words.");
+});
+
+test("assignment reports candidates instead of guessing, but an exact title is not ambiguous", async () => {
+  const svc = service({
+    rawAssignments: { "100": [folder(1, "Lab 1"), folder(10, "Lab 10"), folder(11, "Lab 1 Prelab")] }
+  });
+
+  const exact = await svc.assignment({ assignmentQuery: "lab 1" });
+  assert.equal(exact.status, "ok", "'Lab 1' names one folder even though 'Lab 10' contains it");
+  assert.equal(exact.assignment?.id, "1");
+
+  const vague = await svc.assignment({ assignmentQuery: "lab" });
+  assert.equal(vague.status, "ambiguous");
+  assert.equal(vague.candidates?.length, 3);
+  assert.equal(vague.assignment, undefined);
+});
+
+test("assignment matches a folder id exactly, and never shows a hidden folder", async () => {
+  const svc = service({
+    rawAssignments: { "100": [folder(1, "Report"), folder(2, "Secret", { IsHidden: true })] }
+  });
+  assert.equal((await svc.assignment({ assignmentQuery: "1" })).assignment?.title, "Report");
+  assert.equal((await svc.assignment({ assignmentQuery: "secret" })).status, "not_found");
+});
+
+test("an assignment in an org unit you cannot see is not_found, with the reason in errors", async () => {
+  const svc = service({
+    rawAssignments: { "100": [folder(1, "Report")] },
+    fail: { "101": new LearnPermissionError("/d2l/api/le/1.95/101/dropbox/folders/") }
+  });
+  const result = await svc.assignment({ assignmentQuery: "lab", courseQuery: "ECE 318" });
+  assert.equal(result.status, "not_found");
+  assert.equal(result.errors[0]?.error, "LearnPermissionError");
+});
+
+test("locateDownload names a content file after its URL, not its display title", async () => {
+  const svc = service({
+    toc: { "100": tocWith([topic(1, "Lab 2 starter", "/content/enforced/100-ECE318/lab2%20starter_code.zip")]) }
+  });
+
+  const result = await svc.locateDownload({ courseQuery: "ECE 318", topicQuery: "starter" });
+  assert.equal(result.status, "ok");
+  assert.equal(result.source?.kind, "topic");
+  assert.equal(result.source?.fileName, "lab2 starter_code.zip");
+});
+
+test("locateDownload picks an assignment's only attachment, and asks when there are several", async () => {
+  const one = service({
+    rawAssignments: { "100": [folder(7, "Lab 3", { Attachments: [{ FileId: 9, FileName: "spec.pdf", Size: 1 }] })] }
+  });
+  const single = await one.locateDownload({ assignmentQuery: "lab 3" });
+  assert.equal(single.status, "ok");
+  assert.equal(single.source?.fileName, "spec.pdf");
+
+  const many = service({
+    rawAssignments: {
+      "100": [
+        folder(7, "Lab 3", {
+          Attachments: [
+            { FileId: 9, FileName: "spec.pdf", Size: 1 },
+            { FileId: 10, FileName: "starter.zip", Size: 2 }
+          ]
+        })
+      ]
+    }
+  });
+  const ambiguous = await many.locateDownload({ assignmentQuery: "lab 3" });
+  assert.equal(ambiguous.status, "ambiguous");
+  assert.deepEqual(ambiguous.candidates?.map((c) => [c.kind, c.id, c.assignmentId]), [
+    ["attachment", "9", "7"],
+    ["attachment", "10", "7"]
+  ]);
+
+  const chosen = await many.locateDownload({ assignmentQuery: "lab 3", fileId: "10" });
+  assert.equal(chosen.source?.fileName, "starter.zip");
+  assert.equal((await many.locateDownload({ assignmentQuery: "lab 3", fileId: "99" })).status, "not_found");
+});
+
+test("locateDownload needs exactly one of a topic and an assignment", async () => {
+  const svc = service({});
+  await assert.rejects(() => svc.locateDownload({}), /exactly one/);
+  await assert.rejects(() => svc.locateDownload({ topicQuery: "a", assignmentQuery: "b" }), /exactly one/);
 });

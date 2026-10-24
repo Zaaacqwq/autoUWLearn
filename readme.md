@@ -36,7 +36,9 @@ Optional:
 LEARN_BASE_URL=https://learn.uwaterloo.ca
 LEARN_STATE_HOME=~/.uwlearn-mcp          # profile, storage state, tokens, downloads
 LEARN_HEADLESS=true                      # interactive login only; recovery is always headless
-LEARN_HEARTBEAT_MS=300000                # how often to keep the LEARN session warm
+LEARN_HEARTBEAT_MS=300000                # how often to keep the LEARN session warm; 0 turns it off
+LEARN_MCP_TOOLSET=all                    # "agent": no login tools, no browser (see below)
+LEARN_DOWNLOAD_ROOTS=/path/a:/path/b     # where learn_download may write; unset = downloads off
 LEARN_MCP_AUTHORIZE_ATTEMPTS=10          # per window
 LEARN_MCP_AUTHORIZE_WINDOW_MS=900000
 ```
@@ -119,6 +121,8 @@ Every read takes an optional `courseQuery` such as `ECE 318`, `ece318` or `318`.
 | `learn_announcements` | What is the latest announcement? |
 | `learn_content` | What lecture slides and handouts exist? |
 | `learn_read_content` | What does that lecture actually say? (PDF → text) |
+| `learn_assignment` | What does this assignment ask for, what does it hand out, did I submit it? |
+| `learn_download` | Save a handout, starter archive or assignment attachment into a local folder |
 | `learn_auth_status` / `learn_auth_start` / `learn_auth_save` / `learn_auth_reset` | Session management |
 
 `learn_due_dates` unions three sources, because none is complete on its own: calendar events, assignment folders and quizzes. A deadline can hang off a content module, which the latter two cannot express; and a course's quizzes can be dated while its calendar is empty. Each item carries `submissionStatus`, read from LEARN's list pages — the Valence API exposes no per-student status, so a caller must never infer "not submitted" from the absence of a grade.
@@ -126,6 +130,31 @@ Every read takes an optional `courseQuery` such as `ECE 318`, `ece318` or `318`.
 A query matching several courses or topics returns the candidates rather than silently picking one. One org unit failing (a lab you cannot see, a transient error) is reported in `errors[]` while the rest of the data still returns.
 
 `learn_read_content` only fetches `/content/enforced/...` paths on the LEARN host, so it cannot be pointed at an arbitrary URL.
+
+`learn_assignment` reads an assignment folder's instructions as text, its attachments and links, its deadline and its submission status. Its `assignmentQuery` matches a folder id exactly or a title substring; when several titles contain the query, one that *is* the query wins ("Lab 1" over "Lab 10"), and otherwise the candidates come back.
+
+`learn_download` saves one file — a content topic (`topicQuery`) or an assignment attachment (`assignmentQuery`, plus `fileId` when there are several) — into `destDir`. Everything it does toward LEARN is a GET; it never submits or uploads. On this machine it writes only inside `LEARN_DOWNLOAD_ROOTS`:
+
+- No roots configured: every call is refused with `DOWNLOADS_DISABLED`.
+- `destDir` must be absolute and, by its real path, inside a root, so neither `..` nor a symlink can lead out (`OUTSIDE_DOWNLOAD_ROOTS`). Missing folders inside a root are created.
+- The file name is the last segment of LEARN's name, cleaned; never hidden. An existing file is kept (`FILE_EXISTS`) unless `overwrite: true`.
+- The file is written beside its destination and moved into place, so nobody sees half of it. Files over 200 MB are refused (`FILE_TOO_LARGE`). Archives are not extracted.
+
+### Agents
+
+`LEARN_MCP_TOOLSET=agent` is for unattended clients that start their own stdio server, such as one per agent run. It registers the reads, `learn_assignment`, `learn_download` and `learn_auth_status`, and leaves out `learn_auth_start`, `learn_auth_save` and `learn_auth_reset`. It also never drives a browser: a lapsed session is reported as `AUTH_REQUIRED` instead of re-logged in silently. Many short-lived servers launching Chromium on the one shared profile would fight over its lock, and one killed with its run would leave the browser holding it. The long-running HTTP server's heartbeat re-logs in for everyone, and every read takes the session from disk, so an agent picks it up on its next call.
+
+```json
+{
+  "mcpServers": {
+    "learn": {
+      "command": "node",
+      "args": ["/path/to/autoUWLearn/dist/server.js"],
+      "env": { "LEARN_MCP_TOOLSET": "agent", "LEARN_DOWNLOAD_ROOTS": "/path/to/course" }
+    }
+  }
+}
+```
 
 ## Security
 

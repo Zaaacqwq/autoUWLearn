@@ -1,7 +1,13 @@
 import { flattenToc, type ContentTopic, type RawModule } from "./contentTree.js";
 import { findCourses, mergeOrgUnits, type Course, type OrgUnit } from "./courseIdentity.js";
-import { extractDocumentText } from "./extractText.js";
-import { CALENDAR_EVENT_TYPE, type CalendarEvent, type LearnApi } from "./learnApi.js";
+import { extractDocumentText, richTextToText } from "./extractText.js";
+import {
+  CALENDAR_EVENT_TYPE,
+  type CalendarEvent,
+  type FetchedFile,
+  type FetchFileOptions,
+  type LearnApi
+} from "./learnApi.js";
 import { parseDropboxList, parseQuizList, type SubmissionState } from "./submissionStatus.js";
 
 export type ResolutionStatus = "ok" | "not_found";
@@ -89,6 +95,75 @@ export interface ReadTopicResult {
   readonly truncated?: boolean;
 }
 
+export interface AssignmentSummary {
+  readonly id: string;
+  readonly title: string;
+  /** UTC instant, or null for a folder with no deadline. */
+  readonly dueAt: string | null;
+  readonly dueAtLocal: string | null;
+  readonly courseKey: string;
+  readonly courseLabel: string;
+  readonly orgUnitId: string;
+}
+
+export interface AssignmentAttachment {
+  readonly fileId: string;
+  readonly name: string;
+  readonly size: number | null;
+}
+
+export interface AssignmentLink {
+  readonly name: string;
+  readonly url: string;
+}
+
+export interface AssignmentDetail extends AssignmentSummary {
+  /** The folder's instructions as plain text; empty when it has none. */
+  readonly instructions: string;
+  readonly attachments: readonly AssignmentAttachment[];
+  readonly links: readonly AssignmentLink[];
+  readonly submissionStatus: DueSubmissionStatus;
+}
+
+export interface AssignmentResult {
+  readonly status: "ok" | "not_found" | "ambiguous";
+  readonly query: string;
+  readonly assignment?: AssignmentDetail;
+  readonly candidates?: readonly AssignmentSummary[];
+  readonly errors: readonly OrgUnitError[];
+}
+
+/** One thing a download could mean, listed when a query matches several. */
+export interface DownloadCandidate {
+  readonly kind: "topic" | "assignment" | "attachment";
+  readonly id: string;
+  readonly title: string;
+  readonly courseLabel: string;
+  /** Set for an attachment: the folder it hangs off. */
+  readonly assignmentId?: string;
+}
+
+/** A file located on LEARN and not yet fetched, so a refused write costs no transfer. */
+export type DownloadSource =
+  | {
+      readonly kind: "topic";
+      readonly fileName: string;
+      readonly topic: CourseTopic;
+    }
+  | {
+      readonly kind: "attachment";
+      readonly fileName: string;
+      readonly assignment: AssignmentSummary;
+      readonly attachment: AssignmentAttachment;
+    };
+
+export interface LocateDownloadResult {
+  readonly status: "ok" | "not_found" | "ambiguous";
+  readonly query: string;
+  readonly source?: DownloadSource;
+  readonly candidates?: readonly DownloadCandidate[];
+}
+
 export interface LearnService {
   courses(): Promise<Course[]>;
   upcoming(options?: { daysAhead?: number; courseQuery?: string }): Promise<Result<DueItem>>;
@@ -100,6 +175,15 @@ export interface LearnService {
     courseQuery?: string;
     maxChars?: number;
   }): Promise<ReadTopicResult>;
+  assignment(options: { assignmentQuery: string; courseQuery?: string }): Promise<AssignmentResult>;
+  /** Exactly one of topicQuery and assignmentQuery; fileId picks among an assignment's attachments. */
+  locateDownload(options: {
+    courseQuery?: string;
+    topicQuery?: string;
+    assignmentQuery?: string;
+    fileId?: string;
+  }): Promise<LocateDownloadResult>;
+  fetchDownload(source: DownloadSource, options?: FetchFileOptions): Promise<FetchedFile>;
 }
 
 interface RawCourse {
@@ -115,6 +199,17 @@ interface RawAssignment {
   readonly DueDate?: string | null;
   readonly IsHidden?: boolean;
   readonly Availability?: { readonly EndDate?: string | null } | null;
+  readonly CustomInstructions?: { readonly Text?: string | null; readonly Html?: string | null } | null;
+  readonly Attachments?: ReadonlyArray<{
+    readonly FileId?: number;
+    readonly FileName?: string;
+    readonly Size?: number | null;
+  }> | null;
+  readonly LinkAttachments?: ReadonlyArray<{
+    readonly LinkId?: number;
+    readonly LinkName?: string;
+    readonly Href?: string;
+  }> | null;
 }
 
 interface RawQuiz {
@@ -243,16 +338,23 @@ export function createLearnService(options: LearnServiceOptions): LearnService {
   /**
    * Reads the two pages that state submission status. The Valence API has no
    * student-visible equivalent, so this is the only source.
+   *
+   * Each page stands alone: a course without quizzes forbids the quiz page
+   * (HIST 232 does), and that must not cost its assignments their status. Only
+   * when both fail is there nothing to report.
    */
   async function statusFor(orgUnitId: string): Promise<{
     quizzesByName: Map<string, SubmissionState>;
     foldersById: Map<string, SubmissionState>;
     foldersByName: Map<string, SubmissionState>;
   }> {
-    const [quizHtml, dropboxHtml] = await Promise.all([
+    const [quizPage, dropboxPage] = await Promise.allSettled([
       api.fetchHtml(`/d2l/lms/quizzing/user/quizzes_list.d2l?ou=${orgUnitId}`),
       api.fetchHtml(`/d2l/lms/dropbox/user/folders_list.d2l?ou=${orgUnitId}`)
     ]);
+    if (quizPage.status === "rejected" && dropboxPage.status === "rejected") throw dropboxPage.reason;
+    const quizHtml = quizPage.status === "fulfilled" ? quizPage.value : "";
+    const dropboxHtml = dropboxPage.status === "fulfilled" ? dropboxPage.value : "";
 
     const quizzesByName = new Map(parseQuizList(quizHtml).map((q) => [q.name, q.state]));
     const folders = parseDropboxList(dropboxHtml);
@@ -493,13 +595,8 @@ export function createLearnService(options: LearnServiceOptions): LearnService {
       return { status: "not_found", query: input.topicQuery };
     }
 
-    const needle = input.topicQuery.trim().toLowerCase();
     const readable = listing.items.filter((topic) => topic.isFile);
-
-    const exact = readable.filter((topic) => topic.topicId === input.topicQuery.trim());
-    const matches = exact.length > 0
-      ? exact
-      : readable.filter((topic) => topic.title.toLowerCase().includes(needle));
+    const matches = pick(readable, input.topicQuery, (topic) => topic.topicId, (topic) => topic.title);
 
     if (matches.length === 0) return { status: "not_found", query: input.topicQuery };
     if (matches.length > 1) {
@@ -522,5 +619,204 @@ export function createLearnService(options: LearnServiceOptions): LearnService {
     };
   }
 
-  return { courses, upcoming, grades, announcements, content, readTopic };
+  /** Visible assignment folders of the matched courses, with the raw folder kept for its details. */
+  async function findFolders(input: { assignmentQuery: string; courseQuery?: string }): Promise<{
+    status: ResolutionStatus;
+    matches: Array<{ folder: RawAssignment; summary: AssignmentSummary }>;
+    errors: OrgUnitError[];
+  }> {
+    const { status, matched } = await resolve(input.courseQuery);
+    if (status === "not_found") return { status, matches: [], errors: [] };
+
+    const { items, errors } = await fanOut(matched, "assignments", async (orgUnitId, course) => {
+      const folders = await api.assignments<RawAssignment[]>(orgUnitId);
+      return folders
+        .filter((folder) => folder.IsHidden !== true && folder.Id !== undefined)
+        .map((folder) => {
+          const dueAt = folder.DueDate ?? folder.Availability?.EndDate ?? null;
+          return {
+            folder,
+            summary: {
+              id: String(folder.Id),
+              title: folder.Name ?? "Untitled assignment",
+              dueAt,
+              dueAtLocal: dueAt ? renderLocal(dueAt) : null,
+              courseKey: course.key,
+              courseLabel: course.label,
+              orgUnitId
+            }
+          };
+        });
+    });
+
+    const matches = pick(items, input.assignmentQuery, (item) => item.summary.id, (item) => item.summary.title);
+    return { status: "ok", matches, errors };
+  }
+
+  /**
+   * One assignment folder in full: what it asks for, what it hands out, and
+   * whether it has been submitted. The folder list already carries the
+   * instructions and attachments, so nothing past it is fetched.
+   */
+  async function assignment(input: { assignmentQuery: string; courseQuery?: string }): Promise<AssignmentResult> {
+    const query = input.assignmentQuery;
+    const { status, matches, errors } = await findFolders(input);
+    if (status === "not_found" || matches.length === 0) return { status: "not_found", query, errors };
+    if (matches.length > 1) {
+      return { status: "ambiguous", query, candidates: matches.slice(0, 20).map((m) => m.summary), errors };
+    }
+
+    const { folder, summary } = matches[0];
+    const pages = await statusFor(summary.orgUnitId).catch(() => null);
+
+    return {
+      status: "ok",
+      query,
+      assignment: {
+        ...summary,
+        instructions: richTextToText(folder.CustomInstructions),
+        attachments: attachmentsOf(folder),
+        links: (folder.LinkAttachments ?? []).flatMap((link) =>
+          link.Href ? [{ name: link.LinkName ?? link.Href, url: link.Href }] : []
+        ),
+        submissionStatus: submissionFor("assignment", summary.title, Number(summary.id), pages)
+      },
+      errors
+    };
+  }
+
+  async function locateDownload(input: {
+    courseQuery?: string;
+    topicQuery?: string;
+    assignmentQuery?: string;
+    fileId?: string;
+  }): Promise<LocateDownloadResult> {
+    const topicQuery = input.topicQuery?.trim();
+    const assignmentQuery = input.assignmentQuery?.trim();
+    if (Boolean(topicQuery) === Boolean(assignmentQuery)) {
+      throw new Error("Pass exactly one of topicQuery or assignmentQuery.");
+    }
+
+    if (topicQuery) {
+      const listing = await content(input.courseQuery);
+      if (listing.status === "not_found") return { status: "not_found", query: topicQuery };
+      const files = listing.items.filter((topic) => topic.isFile);
+      const matches = pick(files, topicQuery, (topic) => topic.topicId, (topic) => topic.title);
+      if (matches.length === 0) return { status: "not_found", query: topicQuery };
+      if (matches.length > 1) {
+        return {
+          status: "ambiguous",
+          query: topicQuery,
+          candidates: matches.slice(0, 20).map((topic) => ({
+            kind: "topic" as const,
+            id: topic.topicId,
+            title: topic.title,
+            courseLabel: topic.courseLabel
+          }))
+        };
+      }
+      return { status: "ok", query: topicQuery, source: { kind: "topic", fileName: topicFileName(matches[0]), topic: matches[0] } };
+    }
+
+    const query = assignmentQuery as string;
+    const { status, matches } = await findFolders({ assignmentQuery: query, courseQuery: input.courseQuery });
+    if (status === "not_found" || matches.length === 0) return { status: "not_found", query };
+    if (matches.length > 1) {
+      return {
+        status: "ambiguous",
+        query,
+        candidates: matches.slice(0, 20).map(({ summary }) => ({
+          kind: "assignment" as const,
+          id: summary.id,
+          title: summary.title,
+          courseLabel: summary.courseLabel
+        }))
+      };
+    }
+
+    const { folder, summary } = matches[0];
+    const fileId = input.fileId?.trim();
+    const attachments = attachmentsOf(folder).filter((file) => !fileId || file.fileId === fileId);
+    if (attachments.length === 0) return { status: "not_found", query: fileId ?? query };
+    if (attachments.length > 1) {
+      return {
+        status: "ambiguous",
+        query,
+        candidates: attachments.map((file) => ({
+          kind: "attachment" as const,
+          id: file.fileId,
+          title: file.name,
+          courseLabel: summary.courseLabel,
+          assignmentId: summary.id
+        }))
+      };
+    }
+    return {
+      status: "ok",
+      query,
+      source: { kind: "attachment", fileName: attachments[0].name, assignment: summary, attachment: attachments[0] }
+    };
+  }
+
+  async function fetchDownload(source: DownloadSource, fileOptions: FetchFileOptions = {}): Promise<FetchedFile> {
+    if (source.kind === "topic") return api.fetchFile(source.topic.url as string, fileOptions);
+    return api.fetchAttachment(source.assignment.orgUnitId, source.assignment.id, source.attachment.fileId, fileOptions);
+  }
+
+  return {
+    courses,
+    upcoming,
+    grades,
+    announcements,
+    content,
+    readTopic,
+    assignment,
+    locateDownload,
+    fetchDownload
+  };
+}
+
+/**
+ * What a query names: an exact id, else every title containing it. Several
+ * containing matches resolve only when exactly one title *is* the query, so
+ * "Lab 1" is not lost to "Lab 10", and "Lab 1a" versus "Lab 1b" is still the
+ * caller's choice rather than a guess.
+ */
+function pick<T>(items: readonly T[], query: string, id: (item: T) => string, title: (item: T) => string): T[] {
+  const trimmed = query.trim();
+  const needle = trimmed.toLowerCase();
+
+  const byId = items.filter((item) => id(item) === trimmed);
+  if (byId.length > 0) return byId;
+
+  const containing = items.filter((item) => title(item).toLowerCase().includes(needle));
+  if (containing.length <= 1) return containing;
+  const exact = containing.filter((item) => title(item).trim().toLowerCase() === needle);
+  return exact.length === 1 ? exact : containing;
+}
+
+const attachmentsOf = (folder: RawAssignment): AssignmentAttachment[] =>
+  (folder.Attachments ?? []).flatMap((file) =>
+    file.FileId === undefined
+      ? []
+      : [
+          {
+            fileId: String(file.FileId),
+            name: file.FileName ?? `attachment-${file.FileId}`,
+            size: typeof file.Size === "number" ? file.Size : null
+          }
+        ]
+  );
+
+/** The name LEARN stores the file under — the URL's last segment — rather than the topic's display title. */
+function topicFileName(topic: CourseTopic): string {
+  const last = (topic.url ?? "").split(/[?#]/)[0].split("/").pop() ?? "";
+  let decoded = last;
+  try {
+    decoded = decodeURIComponent(last);
+  } catch {
+    // A stray % in the name; the raw segment is still a usable name.
+  }
+  if (decoded) return decoded;
+  return topic.extension ? `${topic.title}.${topic.extension}` : topic.title;
 }

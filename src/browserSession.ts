@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import fs from "node:fs/promises";
 import path from "node:path";
 import { chromium, type BrowserContext, type Page } from "playwright";
@@ -131,9 +132,23 @@ export class BrowserSession {
     };
   }
 
+  /**
+   * Writes through a temporary file and a rename. Every other process serving
+   * reads (the HTTP server, each stdio client) re-reads this file per request,
+   * and Playwright's own `storageState({ path })` writes in place: a reader
+   * landing mid-write saw a truncated jar and reported a logged-out session.
+   */
   private async persistStorageState(context: BrowserContext): Promise<void> {
-    await fs.mkdir(path.dirname(config.storageStatePath), { recursive: true }).catch(() => undefined);
-    await context.storageState({ path: config.storageStatePath }).catch(() => undefined);
+    const temporary = `${config.storageStatePath}.${process.pid}.${randomUUID()}.tmp`;
+    try {
+      const state = await context.storageState();
+      await fs.mkdir(path.dirname(config.storageStatePath), { recursive: true });
+      await fs.writeFile(temporary, JSON.stringify(state), { mode: 0o600 });
+      await fs.rename(temporary, config.storageStatePath);
+    } catch {
+      // The snapshot on disk is still the last good one.
+      await fs.rm(temporary, { force: true }).catch(() => undefined);
+    }
   }
 
   /** Drives the browser to find out. Only login and recovery need this. */

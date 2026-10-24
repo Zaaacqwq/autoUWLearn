@@ -45,6 +45,26 @@ function htmlToText(html: string): string {
 }
 
 /**
+ * Plain text for one of Brightspace's RichText blocks, such as an assignment's
+ * instructions. Its `Text` rendering is usually empty, so the HTML is read,
+ * keeping paragraphs, line breaks and list items on their own lines — the
+ * `text()` of the raw markup would run them together.
+ */
+export function richTextToText(rich: { readonly Text?: string | null; readonly Html?: string | null } | null | undefined): string {
+  const plain = rich?.Text?.trim();
+  if (plain) return tidy(plain);
+  const html = rich?.Html?.trim();
+  if (!html) return "";
+
+  const $ = cheerio.load(html);
+  $("script, style, noscript").remove();
+  $("br").replaceWith("\n");
+  $("li").prepend("- ");
+  $("p, div, li, tr, h1, h2, h3, h4, h5, h6, pre, blockquote").append("\n");
+  return tidy($("body").length ? $("body").text() : $.root().text());
+}
+
+/**
  * Turns a downloaded course file into readable text.
  *
  * Sniffs the format from the bytes first, because LEARN serves some files as

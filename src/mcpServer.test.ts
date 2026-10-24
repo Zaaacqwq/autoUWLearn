@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import fs from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
 import test from "node:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
@@ -62,7 +65,21 @@ function fakeApi(overrides: { readonly failAll?: Error } = {}) {
           ? '<table><tr><td><a href="javascript://">Prelab4</a></td><td></td><td>0 / 1</td></tr></table>'
           : '<table><tr><th>Lab1.Post-lab</th><td><a href="/x?db=4001">1 Submission, 1 File</a></td><td>-</td><td></td></tr></table>'
       ),
-    assignments: async () => guard([]),
+    // No due date, so it stays out of learn_due_dates' window.
+    assignments: async (ou: string | number) =>
+      guard(
+        String(ou) === "2002"
+          ? [
+              {
+                Id: 4001,
+                Name: "Lab1.Post-lab",
+                DueDate: null,
+                CustomInstructions: { Text: "", Html: "<p>Submit the report.</p>" },
+                Attachments: [{ FileId: 51, FileName: "template.docx", Size: 3 }]
+              }
+            ]
+          : []
+      ),
     quizzes: async () => guard({ Objects: [] }),
     grades: async (ou: string | number) =>
       guard(
@@ -106,7 +123,8 @@ function fakeApi(overrides: { readonly failAll?: Error } = {}) {
             }
           : { Modules: [] }
       ),
-    fetchFile: async () => ({ bytes: new Uint8Array([1]), contentType: "application/pdf", url: "x" })
+    fetchFile: async () => ({ bytes: new Uint8Array([1]), contentType: "application/pdf", url: "x" }),
+    fetchAttachment: async () => ({ bytes: new Uint8Array([7, 7, 7]), contentType: "application/octet-stream", url: "x" })
   } as never;
 }
 
@@ -136,7 +154,14 @@ class FakeBrowser extends BrowserSession {
 
 async function withClient(
   run: (client: Client) => Promise<void>,
-  options: { failAll?: Error; failOnce?: Error; recover?: () => Promise<boolean> } = {}
+  options: {
+    failAll?: Error;
+    failOnce?: Error;
+    recover?: () => Promise<boolean>;
+    toolset?: "all" | "agent";
+    downloadRoots?: string[];
+    browser?: BrowserSession;
+  } = {}
 ) {
   // failOnce reproduces the real shape of a lapse: the first read fails, and a
   // silent re-login is all that stands between the user and an answer.
@@ -150,8 +175,10 @@ async function withClient(
     }
   });
   const service = createLearnService({ api, now: () => NOW });
-  const { server } = createLearnMcpServer(new FakeBrowser(), {
+  const { server } = createLearnMcpServer(options.browser ?? new FakeBrowser(), {
     service,
+    toolset: options.toolset ?? "all",
+    downloadRoots: options.downloadRoots ?? [],
     ...(options.recover ? { recovery: createSessionRecovery({ recover: options.recover }) } : {})
   });
   const client = new Client({ name: "autouwlearn-test", version: "1.0.0" });
@@ -363,5 +390,162 @@ test("registering the tools populates the doc registry that /tools.json serves",
   const names = getToolDocs().map((doc) => doc.name);
   assert.ok(names.includes("learn_due_dates"), "learn_due_dates should be documented");
   assert.ok(names.includes("learn_read_content"));
+  assert.ok(names.includes("learn_assignment"));
+  assert.ok(names.includes("learn_download"));
   assert.ok(getToolDocs().every((doc) => doc.inputSchema), "every tool documents its input");
+});
+
+test("the agent toolset leaves out the login tools and keeps reads and downloads", async () => {
+  await withClient(
+    async (client) => {
+      const names = (await client.listTools()).tools.map((tool) => tool.name);
+      for (const name of ["learn_auth_start", "learn_auth_save", "learn_auth_reset"]) {
+        assert.ok(!names.includes(name), `${name} is not an agent's to call`);
+      }
+      for (const name of ["learn_auth_status", "learn_due_dates", "learn_read_content", "learn_assignment", "learn_download"]) {
+        assert.ok(names.includes(name), `${name} is available`);
+      }
+    },
+    { toolset: "agent" }
+  );
+});
+
+test("an agent's server reports a lapsed session instead of starting a browser", async () => {
+  // Many short-lived agent servers share one browser profile; recovery is the
+  // long-running server's job.
+  class CountingBrowser extends FakeBrowser {
+    refreshes = 0;
+    override async refreshSession(): Promise<boolean> {
+      this.refreshes += 1;
+      return true;
+    }
+  }
+  const browser = new CountingBrowser();
+  await withClient(
+    async (client) => {
+      const result = await client.callTool({ name: "learn_due_dates", arguments: {} });
+      assert.equal(result.isError, true);
+      assert.equal(JSON.parse((result.content as any)[0].text).error, "AUTH_REQUIRED");
+    },
+    { toolset: "agent", browser, failAll: new LearnAuthError("/d2l/api/le/1.95/1/grades/") }
+  );
+  assert.equal(browser.refreshes, 0);
+});
+
+test("learn_assignment returns an assignment's instructions, attachments and status", async () => {
+  await withClient(async (client) => {
+    const result = await client.callTool({
+      name: "learn_assignment",
+      arguments: { assignmentQuery: "post-lab", courseQuery: "ECE 318" }
+    });
+    assert.equal(result.isError, undefined);
+
+    const { status, assignment } = result.structuredContent as any;
+    assert.equal(status, "ok");
+    assert.equal(assignment.instructions, "Submit the report.");
+    assert.deepEqual(assignment.attachments, [{ fileId: "51", name: "template.docx", size: 3 }]);
+    assert.equal(assignment.submissionStatus, "submitted");
+    assert.equal(assignment.dueAt, null);
+  });
+});
+
+/** A download root in the temp dir, by its real path (/tmp is a link on macOS). */
+async function withRoot(run: (root: string) => Promise<void>) {
+  const root = await fs.realpath(await fs.mkdtemp(path.join(os.tmpdir(), "autouwlearn-mcp-dl-")));
+  try {
+    await run(root);
+  } finally {
+    await fs.rm(root, { recursive: true, force: true });
+  }
+}
+
+const errorOf = (result: any) => JSON.parse(result.content[0].text).error;
+
+test("learn_download saves a course file into the folder asked for", async () => {
+  await withRoot(async (root) => {
+    await withClient(
+      async (client) => {
+        const destDir = path.join(root, "lectures");
+        const result = await client.callTool({
+          name: "learn_download",
+          arguments: { courseQuery: "ECE 318", topicQuery: "introduction", destDir }
+        });
+        assert.equal(result.isError, undefined);
+
+        const content = result.structuredContent as any;
+        assert.equal(content.path, path.join(destDir, "01-introduction.pdf"));
+        assert.equal(content.bytes, 1);
+        assert.deepEqual(content.source, { kind: "topic", id: "3001", title: "01-introduction", courseLabel: "ECE 318" });
+        assert.deepEqual([...(await fs.readFile(content.path))], [1]);
+
+        const again = await client.callTool({
+          name: "learn_download",
+          arguments: { courseQuery: "ECE 318", topicQuery: "introduction", destDir }
+        });
+        assert.equal(again.isError, true);
+        assert.equal(errorOf(again), "FILE_EXISTS");
+
+        const replaced = await client.callTool({
+          name: "learn_download",
+          arguments: { courseQuery: "ECE 318", topicQuery: "introduction", destDir, overwrite: true }
+        });
+        assert.equal(replaced.isError, undefined);
+      },
+      { downloadRoots: [root] }
+    );
+  });
+});
+
+test("learn_download saves an assignment attachment", async () => {
+  await withRoot(async (root) => {
+    await withClient(
+      async (client) => {
+        const result = await client.callTool({
+          name: "learn_download",
+          arguments: { assignmentQuery: "post-lab", destDir: root }
+        });
+        const content = result.structuredContent as any;
+        assert.equal(content.path, path.join(root, "template.docx"));
+        assert.equal(content.source.kind, "attachment");
+        assert.equal(content.source.assignmentId, "4001");
+        assert.deepEqual([...(await fs.readFile(content.path))], [7, 7, 7]);
+      },
+      { downloadRoots: [root] }
+    );
+  });
+});
+
+test("learn_download refuses a folder outside its roots, and is off without any", async () => {
+  await withRoot(async (root) => {
+    await withClient(
+      async (client) => {
+        const result = await client.callTool({
+          name: "learn_download",
+          arguments: { topicQuery: "introduction", destDir: path.dirname(root) }
+        });
+        assert.equal(result.isError, true);
+        assert.equal(errorOf(result), "OUTSIDE_DOWNLOAD_ROOTS");
+      },
+      { downloadRoots: [root] }
+    );
+  });
+
+  await withClient(async (client) => {
+    const result = await client.callTool({ name: "learn_download", arguments: { topicQuery: "introduction", destDir: "/tmp" } });
+    assert.equal(errorOf(result), "DOWNLOADS_DISABLED");
+  });
+});
+
+test("learn_download wants exactly one of a topic and an assignment", async () => {
+  await withRoot(async (root) => {
+    await withClient(
+      async (client) => {
+        for (const args of [{}, { topicQuery: "a", assignmentQuery: "b" }, { topicQuery: "a", fileId: "1" }]) {
+          const result = await client.callTool({ name: "learn_download", arguments: { ...args, destDir: root } });
+          assert.equal(errorOf(result), "INVALID_ARGUMENTS", JSON.stringify(args));
+        }
+      },
+      { downloadRoots: [root] }
+    );
+  });
 });

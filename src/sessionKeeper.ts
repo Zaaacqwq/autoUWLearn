@@ -114,7 +114,9 @@ export function createSessionKeeper(options: SessionKeeperOptions): SessionKeepe
 
   return {
     start(): void {
-      if (running) return;
+      // 0 (or an unparseable LEARN_HEARTBEAT_MS) turns the beat off. Scheduled
+      // as given, it would re-arm immediately and probe LEARN in a tight loop.
+      if (running || !(intervalMs > 0)) return;
       running = true;
       schedule();
     },

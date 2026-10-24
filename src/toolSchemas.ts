@@ -312,6 +312,59 @@ export const ReadTopicSchema = z.object({
   truncated: z.boolean().optional()
 });
 
+export const AssignmentSummarySchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  /** UTC instant; null when the folder has no deadline. */
+  dueAt: z.string().nullable(),
+  dueAtLocal: z.string().nullable(),
+  courseKey: z.string(),
+  courseLabel: z.string(),
+  orgUnitId: z.string()
+});
+
+export const AssignmentDetailSchema = AssignmentSummarySchema.extend({
+  instructions: z.string(),
+  attachments: z.array(z.object({ fileId: z.string(), name: z.string(), size: z.number().nullable() })),
+  links: z.array(z.object({ name: z.string(), url: z.string() })),
+  submissionStatus: z.enum(["submitted", "not_submitted", "not_applicable", "unknown"])
+});
+
+export const AssignmentResultSchema = z.object({
+  status: z.enum(["ok", "not_found", "ambiguous"]),
+  query: z.string(),
+  assignment: AssignmentDetailSchema.optional(),
+  candidates: z.array(AssignmentSummarySchema).optional(),
+  errors: z.array(OrgUnitErrorSchema)
+});
+
+export const DownloadCandidateSchema = z.object({
+  kind: z.enum(["topic", "assignment", "attachment"]),
+  id: z.string(),
+  title: z.string(),
+  courseLabel: z.string(),
+  assignmentId: z.string().optional()
+});
+
+export const LearnDownloadResultSchema = z.object({
+  status: z.enum(["ok", "not_found", "ambiguous"]),
+  query: z.string(),
+  /** Where the file was written. */
+  path: z.string().optional(),
+  bytes: z.number().optional(),
+  contentType: z.string().optional(),
+  source: z
+    .object({
+      kind: z.enum(["topic", "attachment"]),
+      id: z.string(),
+      title: z.string(),
+      courseLabel: z.string(),
+      assignmentId: z.string().optional()
+    })
+    .optional(),
+  candidates: z.array(DownloadCandidateSchema).optional()
+});
+
 export function schemaToJson(schema: z.ZodTypeAny): unknown {
   return z.toJSONSchema(schema);
 }

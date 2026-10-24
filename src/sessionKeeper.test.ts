@@ -84,6 +84,18 @@ test("stop cancels the schedule", async () => {
   assert.equal(timers.pending(), 0);
 });
 
+test("an interval of zero turns the heartbeat off instead of spinning", async () => {
+  // LEARN_HEARTBEAT_MS=0 used to schedule a probe every tick.
+  for (const intervalMs of [0, Number.NaN]) {
+    const { keeper, timers, calls } = build({ intervalMs });
+    keeper.start();
+
+    await timers.advance(900_000);
+    assert.equal(calls.probes, 0);
+    assert.equal(timers.pending(), 0);
+  }
+});
+
 test("an expired session triggers a silent recovery, and stays alive when it works", async () => {
   let probes = 0;
   let recoveries = 0;

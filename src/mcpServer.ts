@@ -1,19 +1,30 @@
+import path from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 import { authRequired } from "./authTypes.js";
 import { BrowserSession } from "./browserSession.js";
-import { config } from "./config.js";
+import { config, type Toolset } from "./config.js";
 import { MissingSessionCookiesError } from "./cookieSource.js";
-import { createLearnApi, LearnAuthError } from "./learnApi.js";
-import { createLearnService, type LearnService } from "./learnService.js";
+import {
+  DownloadError,
+  downloadFileName,
+  MAX_DOWNLOAD_BYTES,
+  refuseExisting,
+  resolveDownloadDir,
+  saveDownload
+} from "./downloads.js";
+import { createLearnApi, LearnAuthError, LearnFileTooLargeError } from "./learnApi.js";
+import { createLearnService, type DownloadSource, type LearnService } from "./learnService.js";
 import { createSessionCookieStore } from "./sessionCookies.js";
 import { createSessionRecovery, type SessionRecovery } from "./sessionRecovery.js";
 import { recordToolDoc, zodRawShapeToJson } from "./toolRegistry.js";
 import {
   AnnouncementsFeedSchema,
+  AssignmentResultSchema,
   AuthStatusSchema,
   ContentListingSchema,
   GradesResultSchema,
+  LearnDownloadResultSchema,
   MergedCoursesResultSchema,
   ReadTopicSchema,
   UpcomingResultSchema,
@@ -30,12 +41,21 @@ export interface LearnMcpServerDeps {
   service?: LearnService;
   /** Injected by tests; otherwise a silent re-login through the browser profile. */
   recovery?: SessionRecovery;
+  /** Injected by tests; otherwise LEARN_MCP_TOOLSET. */
+  toolset?: Toolset;
+  /** Injected by tests; otherwise LEARN_DOWNLOAD_ROOTS. */
+  downloadRoots?: readonly string[];
 }
+
+/** A failed read is reported as it is; nothing is repaired underneath it. */
+const noRecovery: SessionRecovery = { run: (operation) => operation() };
 
 export function createLearnMcpServer(
   browser = new BrowserSession(),
   deps: LearnMcpServerDeps = {}
 ): LearnMcpServerHandle {
+  const toolset = deps.toolset ?? config.toolset;
+  const downloadRoots = deps.downloadRoots ?? config.downloadRoots;
   // Reads go straight to the Valence JSON API over the session cookies. The
   // browser is only needed to establish that session, never to serve a read.
   const cookies = createSessionCookieStore({
@@ -56,7 +76,15 @@ export function createLearnMcpServer(
 
   // A lapsed session is repaired under the failing read rather than reported,
   // whenever the browser profile can still complete SSO without a human.
-  const recovery = deps.recovery ?? createSessionRecovery({ recover: () => browser.refreshSession() });
+  //
+  // Except for agents. Their servers are short-lived and many: each one
+  // launching Chromium on the one shared profile would fight over its lock, and
+  // a server killed with its run would leave the browser holding it. The
+  // long-running HTTP server's heartbeat re-logs in for everyone, and every
+  // read takes the session from disk, so an agent picks that up on its next call.
+  const recovery =
+    deps.recovery ??
+    (toolset === "agent" ? noRecovery : createSessionRecovery({ recover: () => browser.refreshSession() }));
 
   const server = new McpServer({
     name: "autouwlearn",
@@ -87,7 +115,13 @@ export function createLearnMcpServer(
     description: string,
     inputSchema: z.ZodRawShape,
     handler: (input: Record<string, unknown>) => Promise<unknown> | unknown,
-    options: { recoversSession?: boolean; outputSchema?: z.ZodTypeAny; timeoutMs?: number } = {}
+    options: {
+      recoversSession?: boolean;
+      outputSchema?: z.ZodTypeAny;
+      timeoutMs?: number;
+      /** Still read-only toward LEARN, but creates files on this machine. */
+      writesLocalFiles?: boolean;
+    } = {}
   ) {
     recordToolDoc({
       name,
@@ -101,9 +135,10 @@ export function createLearnMcpServer(
         description,
         inputSchema,
         annotations: {
-          readOnlyHint: true,
-          destructiveHint: false,
-          idempotentHint: true,
+          readOnlyHint: !options.writesLocalFiles,
+          // Only with overwrite: true, which the caller has to ask for.
+          destructiveHint: Boolean(options.writesLocalFiles),
+          idempotentHint: !options.writesLocalFiles,
           openWorldHint: true
         },
         securitySchemes: [{ type: "oauth2", scopes: ["learn.read"] }],
@@ -136,6 +171,15 @@ export function createLearnMcpServer(
               { isError: true }
             );
           }
+          if (error instanceof DownloadError) {
+            return jsonResult(
+              { ok: false, error: error.code, message: error.message, ...(error.action ? { action: error.action } : {}) },
+              { isError: true }
+            );
+          }
+          if (error instanceof LearnFileTooLargeError) {
+            return jsonResult({ ok: false, error: "FILE_TOO_LARGE", message: error.message }, { isError: true });
+          }
           const message = error instanceof Error ? error.message : String(error);
           if (message.startsWith("{")) {
             try {
@@ -160,29 +204,33 @@ export function createLearnMcpServer(
     { recoversSession: false, outputSchema: AuthStatusSchema }
   );
 
-  registerReadOnlyTool(
-    "learn_auth_start",
-    "Open Waterloo LEARN in the local browser so the user can complete SSO and MFA by hand, and return the local auth page URL. No Waterloo password is stored or sent to the model.",
-    {},
-    async () => browser.startManualLogin(),
-    { recoversSession: false, outputSchema: AuthStatusSchema, timeoutMs: LOGIN_TOOL_TIMEOUT_MS }
-  );
+  // An agent can see whether the session works but cannot open a login window
+  // nobody is watching, or throw away the session every other client shares.
+  if (toolset === "all") {
+    registerReadOnlyTool(
+      "learn_auth_start",
+      "Open Waterloo LEARN in the local browser so the user can complete SSO and MFA by hand, and return the local auth page URL. No Waterloo password is stored or sent to the model.",
+      {},
+      async () => browser.startManualLogin(),
+      { recoversSession: false, outputSchema: AuthStatusSchema, timeoutMs: LOGIN_TOOL_TIMEOUT_MS }
+    );
 
-  registerReadOnlyTool(
-    "learn_auth_save",
-    "Persist the authenticated LEARN session so it survives the browser closing.",
-    {},
-    async () => browser.saveSessionState(),
-    { recoversSession: false, outputSchema: AuthStatusSchema }
-  );
+    registerReadOnlyTool(
+      "learn_auth_save",
+      "Persist the authenticated LEARN session so it survives the browser closing.",
+      {},
+      async () => browser.saveSessionState(),
+      { recoversSession: false, outputSchema: AuthStatusSchema }
+    );
 
-  registerReadOnlyTool(
-    "learn_auth_reset",
-    "Discard the saved LEARN session. Use only when login state is broken; the user must log in again afterwards.",
-    {},
-    async () => browser.resetSession(),
-    { recoversSession: false, outputSchema: AuthStatusSchema, timeoutMs: LOGIN_TOOL_TIMEOUT_MS }
-  );
+    registerReadOnlyTool(
+      "learn_auth_reset",
+      "Discard the saved LEARN session. Use only when login state is broken; the user must log in again afterwards.",
+      {},
+      async () => browser.resetSession(),
+      { recoversSession: false, outputSchema: AuthStatusSchema, timeoutMs: LOGIN_TOOL_TIMEOUT_MS }
+    );
+  }
 
   /* Reads, served from the Valence JSON API. Each takes an optional courseQuery
      such as "ECE 318"; omitting it covers every course. */
@@ -272,7 +320,85 @@ export function createLearnMcpServer(
     { outputSchema: ReadTopicSchema }
   );
 
+  registerReadOnlyTool(
+    "learn_assignment",
+    "One assignment (dropbox folder) in full: its instructions as text, its attachments (handouts, starter files) and links, its deadline, and whether it has been submitted. assignmentQuery matches a folder id exactly, or a substring of the title; returns candidates instead of guessing when several match. Use learn_download with the same assignmentQuery to fetch an attachment.",
+    {
+      assignmentQuery: z.string().min(1),
+      courseQuery: z.string().min(1).optional()
+    },
+    async (input) =>
+      service.assignment({
+        assignmentQuery: input.assignmentQuery as string,
+        courseQuery: input.courseQuery as string | undefined
+      }),
+    { outputSchema: AssignmentResultSchema }
+  );
+
+  registerReadOnlyTool(
+    "learn_download",
+    `Save one course file to a folder on this machine: a content file (topicQuery, matched like learn_read_content — starter code, handouts, slides) or an assignment attachment (assignmentQuery, plus fileId when it has several). destDir must be an absolute folder inside the server's allowed download roots; it is created if missing. An existing file is never replaced unless overwrite is true. Archives are saved as they are, not extracted. Files over ${MAX_DOWNLOAD_BYTES / 1024 / 1024} MB are refused. Nothing is ever sent to LEARN.`,
+    {
+      destDir: z.string().min(1),
+      courseQuery: z.string().min(1).optional(),
+      topicQuery: z.string().min(1).optional(),
+      assignmentQuery: z.string().min(1).optional(),
+      fileId: z.string().min(1).optional(),
+      overwrite: z.boolean().default(false).optional()
+    },
+    async (input) => {
+      const topicQuery = input.topicQuery as string | undefined;
+      const assignmentQuery = input.assignmentQuery as string | undefined;
+      const fileId = input.fileId as string | undefined;
+      const overwrite = input.overwrite === true;
+      if (Boolean(topicQuery) === Boolean(assignmentQuery)) {
+        throw new DownloadError("INVALID_ARGUMENTS", "Pass exactly one of topicQuery or assignmentQuery.");
+      }
+      if (fileId && !assignmentQuery) {
+        throw new DownloadError("INVALID_ARGUMENTS", "fileId picks an assignment attachment; pass assignmentQuery with it.");
+      }
+
+      // Refuse a write before asking LEARN for anything.
+      const dir = await resolveDownloadDir(downloadRoots, input.destDir as string);
+      const located = await service.locateDownload({
+        courseQuery: input.courseQuery as string | undefined,
+        topicQuery,
+        assignmentQuery,
+        fileId
+      });
+      if (located.status !== "ok" || !located.source) return located;
+
+      const name = downloadFileName(located.source.fileName);
+      await refuseExisting(path.join(dir, name), overwrite);
+      const file = await service.fetchDownload(located.source, { maxBytes: MAX_DOWNLOAD_BYTES });
+      const written = await saveDownload(dir, name, file.bytes, { overwrite });
+
+      return {
+        status: "ok",
+        query: located.query,
+        path: written,
+        bytes: file.bytes.byteLength,
+        contentType: file.contentType,
+        source: describeSource(located.source)
+      };
+    },
+    { outputSchema: LearnDownloadResultSchema, timeoutMs: DOWNLOAD_TOOL_TIMEOUT_MS, writesLocalFiles: true }
+  );
+
   return { server, browser };
+}
+
+function describeSource(source: DownloadSource) {
+  if (source.kind === "topic") {
+    return { kind: "topic" as const, id: source.topic.topicId, title: source.topic.title, courseLabel: source.topic.courseLabel };
+  }
+  return {
+    kind: "attachment" as const,
+    id: source.attachment.fileId,
+    title: source.attachment.name,
+    courseLabel: source.assignment.courseLabel,
+    assignmentId: source.assignment.id
+  };
 }
 
 /** Reads answer from the API and must stay snappy. */
@@ -284,6 +410,9 @@ const DEFAULT_TOOL_TIMEOUT_MS = 20_000;
  * an API read reported a timeout for work that was proceeding normally.
  */
 const LOGIN_TOOL_TIMEOUT_MS = 90_000;
+
+/** A large starter archive over a slow link; a read's 20 seconds would cut it off. */
+const DOWNLOAD_TOOL_TIMEOUT_MS = 120_000;
 
 async function withToolTimeout<T>(
   operation: Promise<T> | T,

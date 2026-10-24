@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { createLearnApi, LearnAuthError, LearnPermissionError, LearnHttpError } from "./learnApi.js";
+import { createLearnApi, LearnAuthError, LearnFileTooLargeError, LearnPermissionError, LearnHttpError } from "./learnApi.js";
 
 const versionsPayload = [
   { ProductCode: "le", LatestVersion: "1.95" },
@@ -334,4 +334,49 @@ test("a failed versions lookup is not remembered past the re-login that fixes it
   sessionAlive = true;
   const me = await settlesWithin(api.whoami(), 1000);
   assert.equal((me as { Identifier: string }).Identifier, "1");
+});
+
+test("an assignment attachment is fetched from its folder by id", async () => {
+  const { client, stub } = api([
+    versionsRoute,
+    [/dropbox\/folders\/77\/attachments\/5/, () => new Response(new Uint8Array([1, 2, 3]), { headers: { "content-type": "application/zip" } })]
+  ]);
+
+  const file = await client.fetchAttachment(1300, 77, 5);
+  assert.deepEqual([...file.bytes], [1, 2, 3]);
+  assert.equal(file.contentType, "application/zip");
+  assert.ok(stub.calls.some((c) => c.url.endsWith("/d2l/api/le/1.95/1300/dropbox/folders/77/attachments/5")));
+});
+
+test("an attachment id that is not a number is refused before any request", async () => {
+  // The ids become path segments; "../" would point the download elsewhere.
+  const { client, stub } = api([versionsRoute]);
+  await assert.rejects(() => client.fetchAttachment(1300, "77/../../x", 5), /non-numeric/);
+  assert.equal(stub.calls.length, 0);
+});
+
+test("a file declared larger than the cap is refused without reading it", async () => {
+  const { client } = api([
+    versionsRoute,
+    [/content\/enforced/, () => new Response(new Uint8Array(10), { headers: { "content-length": "10" } })]
+  ]);
+  await assert.rejects(() => client.fetchFile("/content/enforced/1-X/big.zip", { maxBytes: 4 }), LearnFileTooLargeError);
+});
+
+test("a body that runs past the cap is cut off even without a declared length", async () => {
+  const streamed = () =>
+    new Response(
+      new ReadableStream({
+        start(controller) {
+          controller.enqueue(new Uint8Array(3));
+          controller.enqueue(new Uint8Array(3));
+          controller.close();
+        }
+      })
+    );
+  const { client } = api([versionsRoute, [/content\/enforced/, streamed]]);
+
+  await assert.rejects(() => client.fetchFile("/content/enforced/1-X/big.zip", { maxBytes: 4 }), LearnFileTooLargeError);
+  const whole = await client.fetchFile("/content/enforced/1-X/big.zip", { maxBytes: 6 });
+  assert.equal(whole.bytes.byteLength, 6, "a file exactly at the cap is fine");
 });
