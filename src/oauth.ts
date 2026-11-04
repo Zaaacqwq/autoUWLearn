@@ -11,9 +11,10 @@ const tokenTtlSeconds = 60 * 60 * 24 * 7;
 const codeTtlMs = 10 * 60 * 1000;
 
 // The OAuth password is the only credential guarding this resource, and every
-// other authorize parameter is public (the redirect allowlist is hard-coded and
-// the resource URL is published in the protected-resource metadata). Bound the
-// number of guesses per window.
+// other authorize parameter is public (the redirect allowlist is chatgpt.com
+// plus the exact URIs in LEARN_MCP_EXTRA_REDIRECT_URIS, and the resource URL is
+// published in the protected-resource metadata). Bound the number of guesses
+// per window.
 const authorizeLimiter = createRateLimiter({
   capacity: Number(process.env.LEARN_MCP_AUTHORIZE_ATTEMPTS ?? 10),
   windowMs: Number(process.env.LEARN_MCP_AUTHORIZE_WINDOW_MS ?? 15 * 60 * 1000)
@@ -137,7 +138,7 @@ export function renderAuthorize(req: Request, res: Response) {
   <body>
     <h1>Authorize autoUWLearn</h1>
     <div class="box">
-      <p>ChatGPT is requesting read access to your private UW LEARN MCP.</p>
+      <p>An MCP client is requesting read access to your private UW LEARN MCP. After you authorize, you go back to <strong>${escapeHtml(redirectTarget(query.redirect_uri))}</strong>.</p>
       <p class="muted">This is the MCP OAuth password, not your Waterloo password.</p>
       <form method="post" action="/oauth/authorize">
         ${hidden("response_type", query.response_type)}
@@ -152,7 +153,7 @@ export function renderAuthorize(req: Request, res: Response) {
           OAuth password
           <input name="password" type="password" autocomplete="current-password" autofocus required />
         </label>
-        <button type="submit">Authorize ChatGPT</button>
+        <button type="submit">Authorize</button>
       </form>
     </div>
   </body>
@@ -345,6 +346,7 @@ function validateAuthorizeInput(input: Record<string, string>): string | undefin
 }
 
 function isAllowedRedirectUri(value: string): boolean {
+  if (extraRedirectUris().includes(value)) return true;
   try {
     const url = new URL(value);
     return url.protocol === "https:" && url.hostname === "chatgpt.com" && (
@@ -353,6 +355,28 @@ function isAllowedRedirectUri(value: string): boolean {
     );
   } catch {
     return false;
+  }
+}
+
+/**
+ * Other clients' callbacks, from LEARN_MCP_EXTRA_REDIRECT_URIS (comma
+ * separated). Each must match exactly: no prefixes, no wildcards, so a listed
+ * https callback cannot be stretched to another path on that host.
+ */
+function extraRedirectUris(): string[] {
+  return (process.env.LEARN_MCP_EXTRA_REDIRECT_URIS ?? "")
+    .split(",")
+    .map((uri) => uri.trim())
+    .filter((uri) => uri.length > 0);
+}
+
+/** Where the browser goes after a correct password: shown so the owner knows which client asked. */
+function redirectTarget(value: string): string {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" ? url.host : value;
+  } catch {
+    return value;
   }
 }
 

@@ -9,6 +9,7 @@ export PATH="/opt/homebrew/bin:$PATH"
 #   LEARN_MCP_PUBLIC_BASE_URL   e.g. https://mcp.example.com
 #   LEARN_MCP_RESOURCE_URL      e.g. https://mcp.example.com/mcp
 #   LEARN_MCP_ALLOWED_HOSTS     hostnames the reverse proxy forwards, comma separated
+#   LEARN_MCP_EXTRA_REDIRECT_URIS  optional: other MCP clients' exact OAuth callbacks, comma separated
 if [ -f ".local/server.env" ]; then
   set -a
   # shellcheck disable=SC1091

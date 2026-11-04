@@ -30,6 +30,14 @@ LEARN_MCP_RESOURCE_URL=https://mcp.example.com/mcp
 LEARN_MCP_ALLOWED_HOSTS=mcp.example.com,mcp.example.com:443,127.0.0.1,localhost
 ```
 
+ChatGPT's callbacks are always allowed. To let another MCP client (say a self-hosted chat app) authorize too, list its exact callback URIs, comma separated:
+
+```bash
+LEARN_MCP_EXTRA_REDIRECT_URIS=https://chat.example.com/mcp/oauth/callback,myapp://mcp-oauth-callback
+```
+
+Each must match exactly (no prefix, no wildcard). The client still needs the OAuth password; the authorize page shows which host it will send you back to.
+
 Optional:
 
 ```bash
@@ -158,7 +166,7 @@ A query matching several courses or topics returns the candidates rather than si
 
 ## Security
 
-The OAuth password is the only credential between the internet and your grades, and every other authorize parameter is public — the redirect allowlist is hard-coded to `chatgpt.com`, and the resource URL is published at `/.well-known/oauth-protected-resource`. So:
+The OAuth password is the only credential between the internet and your grades, and every other authorize parameter is public — the redirect allowlist is `chatgpt.com` plus the exact URIs you list in `LEARN_MCP_EXTRA_REDIRECT_URIS`, and the resource URL is published at `/.well-known/oauth-protected-resource`. So:
 
 - `/oauth/authorize` is rate limited with a global token bucket (10 attempts per 15 minutes by default). It is deliberately global rather than per-IP: behind a tunnel every request carries the proxy's address, and a per-IP bucket keyed on a client-controlled header would be bypassed by rotating it.
 - The password is compared with `timingSafeEqual` over SHA-256 digests.

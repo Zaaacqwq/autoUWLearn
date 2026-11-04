@@ -12,6 +12,7 @@ process.env.LEARN_MCP_AUTHORIZE_ATTEMPTS = String(capacity);
 process.env.LEARN_MCP_AUTHORIZE_WINDOW_MS = String(15 * 60 * 1000);
 process.env.LEARN_MCP_PUBLIC_BASE_URL = "https://mcp.example.test";
 process.env.LEARN_MCP_RESOURCE_URL = "https://mcp.example.test/mcp";
+process.env.LEARN_MCP_EXTRA_REDIRECT_URIS = " https://chat.example.test/mcp/oauth/callback , app.example://mcp-oauth-callback ";
 process.env.LEARN_OAUTH_TOKEN_STORE_PATH = path.join(
   os.tmpdir(),
   `autouwlearn-oauth-test-${process.pid}.json`
@@ -19,7 +20,7 @@ process.env.LEARN_OAUTH_TOKEN_STORE_PATH = path.join(
 
 // Imported after the environment is set: oauth.js builds its rate limiter and
 // loads its token store at module scope.
-const { handleAuthorize, handleRevoke } = await import("./oauth.js");
+const { handleAuthorize, handleRevoke, renderAuthorize } = await import("./oauth.js");
 
 interface CapturedResponse {
   statusCode: number;
@@ -91,6 +92,24 @@ test("a correct password redirects back with an authorization code", () => {
   assert.equal(redirect.searchParams.get("state"), "opaque-state");
 });
 
+test("a configured extra redirect URI, web or app scheme, gets the code", () => {
+  for (const redirectUri of ["https://chat.example.test/mcp/oauth/callback", "app.example://mcp-oauth-callback"]) {
+    const result = authorize(authorizeBody({ password, client_id: "chat-client", redirect_uri: redirectUri }));
+    assert.equal(result.statusCode, 302, redirectUri);
+    const redirect = new URL(result.redirectedTo as string);
+    assert.equal(redirect.href.split("?")[0], redirectUri);
+    assert.ok(redirect.searchParams.get("code"), "expected an authorization code");
+  }
+});
+
+test("the authorize page names where the browser goes back to", () => {
+  const { res, captured } = fakeRes();
+  renderAuthorize({ query: authorizeBody({ redirect_uri: "https://chat.example.test/mcp/oauth/callback" }) } as unknown as Request, res);
+  assert.equal(captured.statusCode, 200);
+  assert.match(captured.body, /go back to <strong>chat\.example\.test<\/strong>/);
+  assert.doesNotMatch(captured.body, /ChatGPT/);
+});
+
 test("a wrong password is rejected, and repeated guesses are rate limited", () => {
   // The previous test succeeded, which resets the bucket to full capacity.
   for (let attempt = 1; attempt <= capacity; attempt += 1) {
@@ -119,6 +138,16 @@ test("malformed requests are rejected before they consume rate limit budget", ()
 
   const badRedirect = authorize(authorizeBody({ password, redirect_uri: "https://evil.example/cb" }));
   assert.equal(badRedirect.statusCode, 400);
+
+  // Extra redirect URIs match exactly: no other path, query or suffix on that host.
+  for (const near of [
+    "https://chat.example.test/mcp/oauth/callback/other",
+    "https://chat.example.test/mcp/oauth/callback?next=https://evil.example",
+    "https://chat.example.test/",
+    "app.example://mcp-oauth-callback.evil"
+  ]) {
+    assert.equal(authorize(authorizeBody({ password, redirect_uri: near })).statusCode, 400, near);
+  }
 });
 
 test("revoking an unknown token still answers 200 so tokens cannot be probed", () => {
