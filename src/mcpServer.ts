@@ -121,6 +121,8 @@ export function createLearnMcpServer(
       timeoutMs?: number;
       /** Still read-only toward LEARN, but creates files on this machine. */
       writesLocalFiles?: boolean;
+      /** Opens a login window, saves or discards the session every client shares: not a read. */
+      changesSession?: "opens" | "saves" | "discards";
     } = {}
   ) {
     recordToolDoc({
@@ -135,10 +137,11 @@ export function createLearnMcpServer(
         description,
         inputSchema,
         annotations: {
-          readOnlyHint: !options.writesLocalFiles,
-          // Only with overwrite: true, which the caller has to ask for.
-          destructiveHint: Boolean(options.writesLocalFiles),
-          idempotentHint: !options.writesLocalFiles,
+          readOnlyHint: !options.writesLocalFiles && !options.changesSession,
+          // Downloads only with overwrite: true, which the caller has to ask for;
+          // a discarded session needs the user's SSO and MFA to get back.
+          destructiveHint: Boolean(options.writesLocalFiles) || options.changesSession === "discards",
+          idempotentHint: !options.writesLocalFiles && options.changesSession !== "opens",
           openWorldHint: true
         },
         securitySchemes: [{ type: "oauth2", scopes: ["learn.read"] }],
@@ -212,7 +215,7 @@ export function createLearnMcpServer(
       "Open Waterloo LEARN in the local browser so the user can complete SSO and MFA by hand, and return the local auth page URL. No Waterloo password is stored or sent to the model.",
       {},
       async () => browser.startManualLogin(),
-      { recoversSession: false, outputSchema: AuthStatusSchema, timeoutMs: LOGIN_TOOL_TIMEOUT_MS }
+      { recoversSession: false, outputSchema: AuthStatusSchema, timeoutMs: LOGIN_TOOL_TIMEOUT_MS, changesSession: "opens" }
     );
 
     registerReadOnlyTool(
@@ -220,7 +223,7 @@ export function createLearnMcpServer(
       "Persist the authenticated LEARN session so it survives the browser closing.",
       {},
       async () => browser.saveSessionState(),
-      { recoversSession: false, outputSchema: AuthStatusSchema }
+      { recoversSession: false, outputSchema: AuthStatusSchema, changesSession: "saves" }
     );
 
     registerReadOnlyTool(
@@ -228,7 +231,7 @@ export function createLearnMcpServer(
       "Discard the saved LEARN session. Use only when login state is broken; the user must log in again afterwards.",
       {},
       async () => browser.resetSession(),
-      { recoversSession: false, outputSchema: AuthStatusSchema, timeoutMs: LOGIN_TOOL_TIMEOUT_MS }
+      { recoversSession: false, outputSchema: AuthStatusSchema, timeoutMs: LOGIN_TOOL_TIMEOUT_MS, changesSession: "discards" }
     );
   }
 

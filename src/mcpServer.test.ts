@@ -410,6 +410,22 @@ test("the agent toolset leaves out the login tools and keeps reads and downloads
   );
 });
 
+test("login tools are not advertised as read-only; reads are", async () => {
+  // Clients skip confirmation for readOnlyHint tools, and learn_auth_reset
+  // throws away the session every client shares.
+  await withClient(async (client) => {
+    const tools = new Map((await client.listTools()).tools.map((tool) => [tool.name, tool.annotations ?? {}]));
+    for (const name of ["learn_auth_start", "learn_auth_save", "learn_auth_reset"]) {
+      assert.equal(tools.get(name)?.readOnlyHint, false, `${name} is not read-only`);
+    }
+    assert.equal(tools.get("learn_auth_reset")?.destructiveHint, true);
+    assert.equal(tools.get("learn_auth_start")?.destructiveHint, false);
+    for (const name of ["learn_auth_status", "learn_courses", "learn_due_dates"]) {
+      assert.equal(tools.get(name)?.readOnlyHint, true, `${name} is read-only`);
+    }
+  });
+});
+
 test("an agent's server reports a lapsed session instead of starting a browser", async () => {
   // Many short-lived agent servers share one browser profile; recovery is the
   // long-running server's job.
